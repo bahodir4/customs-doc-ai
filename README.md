@@ -71,12 +71,39 @@ customs-doc-ai/
 └── data/        # Docker volumes (gitignored)
 ```
 
+## Phase 2 — Core services
+
+Four independent, async, dependency-injected service classes:
+
+| Service | Responsibility |
+|---|---|
+| `OCRService` | Smart PDF text extraction with PaddleOCR fallback for scans |
+| `LLMService` | Qwen / Ollama wrapper: `complete`, `complete_json`, `detect_language`, `detect_intent`, `chat` |
+| `VectorStoreService` | Async Qdrant client with two collections (`doc_chunks`, `lex_uz`) |
+| `DBService` | Async SQLAlchemy persistence for processed documents |
+
+### Initialise the database
+
+```bash
+python scripts/init_db.py
+```
+
+### Run the smoke tests
+
+```bash
+# Unit-style tests only (no services needed) — 8 tests, ~50 ms
+pytest
+
+# Full smoke suite (requires Qdrant, Postgres, Ollama up) — 28 tests
+pytest --run-integration -v
+```
+
 ## Roadmap
 
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | Infrastructure & scaffolding | done |
-| 2 | Core services (OCR, LLM, vector, DB) | pending |
+| 2 | Core services (OCR, LLM, vector, DB) | done |
 | 3 | Schemas & prompts | pending |
 | 4 | LangGraph pipelines | pending |
 | 5 | lex.uz RAG ingestion | pending |
