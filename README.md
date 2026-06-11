@@ -98,6 +98,48 @@ pytest
 pytest --run-integration -v
 ```
 
+## Platform notes
+
+### Apple Silicon (M1 / M2 / M3 Mac) — recommended setup
+
+Running Ollama inside Docker on Mac is **not recommended** for two reasons:
+
+1. **Memory** — Docker Desktop's VM is capped (8 GB by default). A 7B model
+   needs ~6 GB of weights plus ~2 GB of KV cache, leaving nothing for
+   Qdrant + Postgres. You will see `llama-server process has terminated:
+   signal: killed` — the OS OOM killer at work.
+2. **GPU** — Docker on Mac has no access to Apple's Metal GPU. Inference
+   runs CPU-only and is ~5x slower than native.
+
+**Recommended: run Ollama natively, keep Qdrant + Postgres in Docker.**
+
+```bash
+# 1. Stop the Dockerised Ollama (if it was started before)
+docker compose stop ollama
+docker compose rm -f ollama
+
+# 2. Install native Ollama
+brew install ollama
+brew services start ollama   # auto-starts on boot
+
+# 3. Pull models (same names, faster download via Metal-aware Ollama)
+ollama pull qwen2.5:7b
+ollama pull bge-m3
+
+# 4. Verify — the code calls localhost:11434 either way, no changes needed
+python scripts/verify_services.py
+```
+
+If you want to keep Ollama in Docker, raise Docker Desktop's memory limit
+to **at least 12 GB** (Settings → Resources → Memory) and use a smaller
+model like `qwen2.5:3b` (1.9 GB) by setting `OLLAMA_CHAT_MODEL=qwen2.5:3b`
+in your `.env`.
+
+### Linux / Windows
+
+The default `docker compose up -d` is fine — all three services run in
+containers without issue.
+
 ## Roadmap
 
 | Phase | Scope | Status |

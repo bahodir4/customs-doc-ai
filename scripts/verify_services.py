@@ -79,9 +79,15 @@ class InfraHealthChecker:
             response.raise_for_status()
             payload = response.json()
 
-        models = [m["name"] for m in payload.get("models", [])]
-        required = {settings.ollama.chat_model, settings.ollama.embed_model}
-        missing = required - set(models)
+        # Ollama returns model names with explicit tags (e.g. "bge-m3:latest").
+        # The user configures names with or without the ":latest" suffix.
+        # Normalise both sides so the comparison is tag-aware but lenient.
+        installed = {self._normalise_model(m["name"]) for m in payload.get("models", [])}
+        required = {
+            self._normalise_model(settings.ollama.chat_model),
+            self._normalise_model(settings.ollama.embed_model),
+        }
+        missing = required - installed
 
         if missing:
             missing_str = ", ".join(sorted(missing))
@@ -89,7 +95,12 @@ class InfraHealthChecker:
                 f"reachable but missing model(s): {missing_str} — "
                 f"run `docker exec customs-ollama ollama pull <name>`"
             )
-        return f"{len(models)} model(s): {', '.join(sorted(models))}"
+        return f"{len(installed)} model(s): {', '.join(sorted(installed))}"
+
+    @staticmethod
+    def _normalise_model(name: str) -> str:
+        """Add ':latest' if no tag is present, so comparison is consistent."""
+        return name if ":" in name else f"{name}:latest"
 
     async def run(self) -> bool:
         """Execute all probes and print a status line per service.

@@ -59,6 +59,7 @@ class VectorStoreService:
             host=qdrant_settings.host,
             port=qdrant_settings.port,
             prefer_grpc=False,
+            check_compatibility=False,
         )
         self._embed = OllamaEmbeddings(
             base_url=ollama_settings.base_url,
@@ -178,9 +179,11 @@ class VectorStoreService:
         if not query.strip():
             return []
         [query_vector] = await self._embed_texts([query])
-        result = await self._client.search(
+        # qdrant-client >= 1.10 replaced `search()` with `query_points()`.
+        # The response is a QueryResponse object — iterate `.points`.
+        response = await self._client.query_points(
             collection_name=collection,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=query_filter,
             limit=top_k,
         )
@@ -190,7 +193,7 @@ class VectorStoreService:
                 score=float(hit.score),
                 metadata={k: v for k, v in (hit.payload or {}).items() if k != "text"},
             )
-            for hit in result
+            for hit in response.points
         ]
 
     # ── Embedding ────────────────────────────────────────────────────

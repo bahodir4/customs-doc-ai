@@ -10,7 +10,6 @@ Tests are split implicitly into two kinds:
 """
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -58,16 +57,12 @@ def _configure_logging() -> None:
     configure_logging("INFO")
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Single event loop for the whole test session.
-
-    pytest-asyncio's default function-scoped loop conflicts with
-    session-scoped async fixtures.
-    """
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
+# Note: pytest-asyncio manages the event loop on its own. We used to
+# redefine `event_loop` here as session-scoped — that pattern is deprecated
+# and causes "no current event loop" errors because async clients
+# (AsyncQdrantClient, asyncpg) bind to whatever loop they were created on.
+# All async fixtures below are function-scoped (the default), matching the
+# test's loop.
 
 
 # ── Service fixtures ────────────────────────────────────────────────
