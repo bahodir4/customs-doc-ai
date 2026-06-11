@@ -140,13 +140,50 @@ in your `.env`.
 The default `docker compose up -d` is fine — all three services run in
 containers without issue.
 
+## Phase 3 — Schemas & prompts
+
+Pydantic schemas and extraction prompts for every supported document type:
+
+| Doc type | Schema | Prompt | Mandatory field |
+|---|---|---|---|
+| `invoice` | `InvoiceSchema` (nested seller/buyer/line_items/bank) | `invoice_prompt` | `invoice_number` |
+| `awb` | `AWBSchema` | `awb_prompt` | `awb_number` |
+| `gtd` | `GTDSchema` (with `GTDLineItem`) | `gtd_prompt` | `declaration_number` |
+| `cmr` | `CMRSchema` | `cmr_prompt` | `cmr_number` |
+| `packing_list` | `PackingListSchema` (with `PackageItem`) | `packing_list_prompt` | `packing_list_number` |
+
+Plus a `classify` prompt that maps raw OCR text → one of `invoice / awb / gtd / cmr / packing_list / letter / unknown`.
+
+### Try extraction end-to-end
+
+```bash
+# Auto-classify then extract
+python scripts/extract_sample.py tests/samples/invoice.pdf
+
+# Skip classification and force a doc type
+python scripts/extract_sample.py tests/samples/awb.jpg --type awb
+
+# Write JSON to a file instead of stdout
+python scripts/extract_sample.py tests/samples/gtd.jpg -o gtd.json
+```
+
+### Run the Phase 3 tests
+
+```bash
+# 55 unit tests (Pydantic + prompt registry) — ~0.1 s, no LLM needed
+pytest tests/test_schemas.py tests/test_prompts.py -v
+
+# 4 end-to-end integration tests (classify + extract roundtrips)
+pytest tests/test_extraction.py --run-integration -v
+```
+
 ## Roadmap
 
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | Infrastructure & scaffolding | done |
 | 2 | Core services (OCR, LLM, vector, DB) | done |
-| 3 | Schemas & prompts | pending |
+| 3 | Schemas & prompts | done |
 | 4 | LangGraph pipelines | pending |
 | 5 | lex.uz RAG ingestion | pending |
 | 6 | Streamlit UI | pending |
