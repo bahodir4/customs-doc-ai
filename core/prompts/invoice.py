@@ -8,7 +8,20 @@ from core.prompts._base import build_system_prompt, build_user_prompt
 _SPECIALTY: Final[str] = (
     "Specialty: commercial invoices. Identify the invoice number "
     "(MANDATORY), date, seller, buyer, line items (with HS codes if "
-    "present), totals, currency, incoterms, and banking details."
+    "present), totals, currency, incoterms, and banking details.\n\n"
+    "CRITICAL — distinguishing seller from buyer:\n"
+    "- The SELLER is the party ISSUING the invoice. Look for the company "
+    "  letterhead/logo at the top, or labels like 'From', 'Sold By', "
+    "  'Vendor', 'Supplier', 'Exporter', or 'Shipper'. The bank/IBAN "
+    "  details usually belong to the seller (that's who gets paid).\n"
+    "- The BUYER is the party BEING BILLED. Look for labels like "
+    "  'Bill To', 'Sold To', 'Buyer', 'Customer', 'Importer', "
+    "  'Consignee', or 'Ship To'.\n"
+    "- The seller's country is usually where the goods come FROM. "
+    "  The buyer's country is where the goods go TO.\n"
+    "- The tax_id of each party MUST be on the same letterhead/section "
+    "  as that party's name and address. Do NOT assign a third party's "
+    "  tax ID (e.g. a freight forwarder's VAT) to the seller or buyer."
 )
 
 _SCHEMA_TEMPLATE: Final[str] = """{

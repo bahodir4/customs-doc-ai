@@ -177,6 +177,58 @@ pytest tests/test_schemas.py tests/test_prompts.py -v
 pytest tests/test_extraction.py --run-integration -v
 ```
 
+## Phase 4 — LangGraph pipelines
+
+Two compiled state machines that orchestrate Phase 2 services + Phase 3
+prompts/schemas:
+
+### Document processing pipeline
+
+```
+load → ocr → classify → extract → validate → store
+```
+
+- Linear flow, async throughout, services injected via closure.
+- Error-guard pattern: failure in any node sets `status="error"`; downstream
+  nodes short-circuit, but `store` always runs so a record exists for inspection.
+- Embeds OCR text into Qdrant `doc_chunks` after successful save.
+
+### Chat agent graph
+
+```
+detect_language → detect_intent → [route by intent] → respond
+                                       │
+                                       ├── doc_qa  → retrieve_doc_qa
+                                       ├── rag     → retrieve_rag
+                                       └── hybrid  → retrieve_hybrid
+```
+
+- Conditional routing on the detected intent picks one of three retrieval
+  strategies: PostgreSQL + doc_chunks, lex_uz only, or all three sources.
+- Single `respond` node receives any path and generates the answer in
+  the user's detected language.
+
+### Run the pipelines
+
+```bash
+# Process a document end-to-end (writes to Postgres + Qdrant)
+python scripts/process_document.py "docs/sample_files/Final INVOICES .pdf"
+
+# Ask the chat agent a question
+python scripts/chat_with_docs.py "What is the duty on medical devices?"
+python scripts/chat_with_docs.py "Какова сумма счёта?" --doc-ids <doc_id>
+```
+
+### Run the Phase 4 tests
+
+```bash
+# 12 pure-unit tests (graph helpers + context builders) — ~0.1 s
+pytest tests/test_doc_pipeline.py tests/test_chat_agent.py -v
+
+# 5 integration tests (full pipelines against live services)
+pytest tests/test_doc_pipeline.py tests/test_chat_agent.py --run-integration -v
+```
+
 ## Roadmap
 
 | Phase | Scope | Status |
@@ -184,7 +236,7 @@ pytest tests/test_extraction.py --run-integration -v
 | 1 | Infrastructure & scaffolding | done |
 | 2 | Core services (OCR, LLM, vector, DB) | done |
 | 3 | Schemas & prompts | done |
-| 4 | LangGraph pipelines | pending |
+| 4 | LangGraph pipelines | done |
 | 5 | lex.uz RAG ingestion | pending |
 | 6 | Streamlit UI | pending |
 | 7 | Hardening & demo | pending |
