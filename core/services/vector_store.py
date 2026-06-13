@@ -35,6 +35,7 @@ from core.logging import get_logger
 logger = get_logger(__name__)
 
 _DISTANCE: Final[Distance] = Distance.COSINE
+_BATCH_SIZE: Final[int] = 32  # texts per Ollama embedding call
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +49,8 @@ class SearchHit:
 
 class VectorStoreService:
     """Async Qdrant + embeddings service."""
+
+    _BATCH_SIZE: Final[int] = _BATCH_SIZE
 
     def __init__(
         self,
@@ -137,14 +140,39 @@ class VectorStoreService:
         texts: Sequence[str],
         payloads: Sequence[dict[str, Any]],
     ) -> int:
-        vectors = await self._embed_texts(texts)
-        points = [
-            PointStruct(id=str(uuid.uuid4()), vector=vec, payload=payload)
-            for vec, payload in zip(vectors, payloads)
-        ]
-        await self._client.upsert(collection_name=collection, points=points)
-        logger.info("Upserted %d points into %r.", len(points), collection)
-        return len(points)
+        """Embed and upsert in fixed-size batches.
+
+        Single-shot embedding of thousands of texts overloads Ollama's
+        embedding server (crashes with EOF on connection close). Batching
+        keeps each call bounded and lets us recover/resume more cleanly.
+        """
+        if not texts:
+            return 0
+
+        total_batches = (len(texts) + self._BATCH_SIZE - 1) // self._BATCH_SIZE
+        total_written = 0
+
+        for batch_idx in range(total_batches):
+            start = batch_idx * self._BATCH_SIZE
+            end = start + self._BATCH_SIZE
+            batch_texts = list(texts[start:end])
+            batch_payloads = payloads[start:end]
+
+            vectors = await self._embed.aembed_documents(batch_texts)
+            points = [
+                PointStruct(id=str(uuid.uuid4()), vector=vec, payload=payload)
+                for vec, payload in zip(vectors, batch_payloads)
+            ]
+            await self._client.upsert(collection_name=collection, points=points)
+            total_written += len(points)
+
+            logger.info(
+                "Upserted batch %d/%d into %r (%d / %d points)",
+                batch_idx + 1, total_batches, collection,
+                total_written, len(texts),
+            )
+
+        return total_written
 
     # ── Search ───────────────────────────────────────────────────────
 

@@ -229,6 +229,107 @@ pytest tests/test_doc_pipeline.py tests/test_chat_agent.py -v
 pytest tests/test_doc_pipeline.py tests/test_chat_agent.py --run-integration -v
 ```
 
+## Phase 5 — RAG ingestion (URL / DOCX / Markdown)
+
+Smart hierarchical ingestion into the `lex_uz` Qdrant collection.
+
+### Input formats
+
+| Type | Loader | How |
+|---|---|---|
+| URL  | `URLLoader` | httpx fetch + strip nav/footer/scripts + `markdownify` ATX headings |
+| DOCX | `DocxLoader` | `python-docx` walks paragraphs; styles `Heading 1/2/3` and `Заголовок 1/2/3` map to `#/##/###` |
+| MD/TXT | `MarkdownFileLoader` | Pass-through |
+
+### Smart chunking strategy
+
+Two-stage chunking in `HierarchicalChunker`:
+
+1. **Header split** — `MarkdownHeaderTextSplitter` carves the document at
+   `#`, `##`, `###` boundaries, each piece tagged with its header path.
+2. **Size split** — sections over ~1.5× chunk_size are sub-split by
+   `RecursiveCharacterTextSplitter`; sub-chunks inherit parent headers.
+
+**Key trick:** each chunk's text starts with its full header path
+(`# Customs Code\n## Article 5: Medical Devices\n\n...body...`) so the
+embedding carries section context. A query about "Article 5" matches even
+if the body itself doesn't repeat the article number.
+
+Metadata stored alongside the vector:
+- `h1`, `h2`, `h3` — heading hierarchy
+- `breadcrumb` — `"Customs Code > Article 5: Medical Devices"`
+- `source` — original URL or file path
+- `chunk_index` — position within the source
+
+### Ingest content
+
+**Option A — bulk workflow with cleanup (recommended for lex.uz DOCX downloads):**
+
+```bash
+# 1. Download .docx files from lex.uz manually and drop them in:
+#    docs/lex_uz/originals/
+#
+# 2. Run the bulk workflow:
+python scripts/ingest_lex_docs.py
+```
+
+For each file, the workflow will:
+1. Convert it to markdown (saved to `docs/lex_uz/markdown/`)
+2. Ingest into the `lex_uz` Qdrant collection (with hierarchical chunking)
+3. **On success**, delete both the original and the converted MD
+4. **On failure**, leave both files in place for inspection
+
+This means partial failures are recoverable — just re-run after fixing whatever
+broke; only failed files get retried.
+
+Flags:
+- `--no-delete` — keep both files even after successful ingest (debugging)
+- `--originals-dir PATH` — custom source directory
+- `--markdown-dir PATH` — custom staging directory
+
+**Option B — one-shot from arbitrary source (URL / DOCX / MD / TXT):**
+
+```bash
+# Single URL
+python scripts/ingest_lex.py https://lex.uz/docs/3062271
+
+# Multiple sources, mixed
+python scripts/ingest_lex.py \
+    docs/customs_code.docx \
+    notes/medical_devices.md \
+    https://some-static-site.example.com/article
+```
+
+(Note: lex.uz pages are JavaScript-rendered so the URL path won't extract
+the actual customs text — use the DOCX export and Option A instead.)
+
+**Wipe and re-ingest:**
+
+```bash
+python scripts/clear_lex.py
+python scripts/ingest_lex_docs.py
+```
+
+### Test the chat agent against ingested content
+
+```bash
+python scripts/chat_with_docs.py "What is the customs duty on medical devices?"
+python scripts/chat_with_docs.py "Какова ставка пошлины на код 3822?"
+```
+
+The chat agent (Phase 4) automatically picks up the ingested content via
+`VectorStoreService.search_lex()` — no code changes needed.
+
+### Run the Phase 5 tests
+
+```bash
+# 30 unit tests (chunking + loaders + dispatch) — ~1 s, no LLM needed
+pytest tests/test_rag_chunking.py tests/test_rag_loaders.py tests/test_rag_ingestion.py -v
+
+# 4 integration tests (full ingestion + search round-trip)
+pytest tests/test_rag_ingestion.py --run-integration -v
+```
+
 ## Roadmap
 
 | Phase | Scope | Status |
@@ -237,6 +338,6 @@ pytest tests/test_doc_pipeline.py tests/test_chat_agent.py --run-integration -v
 | 2 | Core services (OCR, LLM, vector, DB) | done |
 | 3 | Schemas & prompts | done |
 | 4 | LangGraph pipelines | done |
-| 5 | lex.uz RAG ingestion | pending |
+| 5 | RAG ingestion (URL / DOCX / MD) | done |
 | 6 | Streamlit UI | pending |
 | 7 | Hardening & demo | pending |
