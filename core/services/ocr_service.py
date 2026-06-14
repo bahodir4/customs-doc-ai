@@ -30,6 +30,7 @@ logger = get_logger(__name__)
 
 _SUPPORTED_IMAGE_EXT: Final[frozenset[str]] = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"})
 _PDF_EXT: Final[str] = ".pdf"
+_DOCX_EXT: Final[str] = ".docx"
 _MIN_TEXT_CHARS_PER_PAGE: Final[int] = 150  # fewer chars → assume scanned/partial-image page
 _OCR_RENDER_DPI: Final[int] = 300           # higher DPI → better accuracy on dense docs
 _OCR_MIN_CONFIDENCE: Final[float] = 0.35   # lower threshold keeps small text in dense forms
@@ -89,16 +90,75 @@ class OCRService:
         suffix = path.suffix.lower()
         if suffix == _PDF_EXT:
             return await self._extract_pdf(path)
+        if suffix == _DOCX_EXT:
+            return await self._extract_docx(path)
         if suffix in _SUPPORTED_IMAGE_EXT:
             return await self._extract_image(path)
         raise ValueError(
             f"Unsupported file type: {suffix!r}. "
-            f"Supported: {_PDF_EXT}, {', '.join(sorted(_SUPPORTED_IMAGE_EXT))}"
+            f"Supported: {_PDF_EXT}, {_DOCX_EXT}, "
+            f"{', '.join(sorted(_SUPPORTED_IMAGE_EXT))}"
         )
 
     async def _extract_pdf(self, path: Path) -> ExtractionResult:
         """Per-page smart routing: text layer for digital pages, OCR for scanned ones."""
         return await asyncio.to_thread(self._extract_pdf_smart, path)
+
+    async def _extract_docx(self, path: Path) -> ExtractionResult:
+        """Extract text from a DOCX file (paragraphs + tables, in document order)."""
+        text = await asyncio.to_thread(self._extract_docx_text, path)
+        logger.info("DOCX %r: extracted %d chars", path.name, len(text))
+        return ExtractionResult(
+            text=text,
+            page_count=1,
+            ocr_used=False,
+            source_path=path,
+            text_layer_pages=1,
+            ocr_pages=0,
+        )
+
+    def _extract_docx_text(self, path: Path) -> str:
+        """Synchronous DOCX extraction.
+
+        Walks the document body in XML order so paragraphs and tables stay
+        interleaved as they appear in the file — important for invoices where
+        a header paragraph is immediately followed by a data table.
+        Tables are rendered as pipe-separated rows so the LLM sees structure.
+        """
+        from docx import Document
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
+        doc = Document(str(path))
+        parts: list[str] = []
+
+        for element in doc.element.body:
+            tag = element.tag.split("}")[-1] if "}" in element.tag else element.tag
+
+            if tag == "p":
+                para = Paragraph(element, doc)
+                text = para.text.strip()
+                if text:
+                    parts.append(text)
+
+            elif tag == "tbl":
+                table = Table(element, doc)
+                row_lines: list[str] = []
+                for row in table.rows:
+                    cells: list[str] = []
+                    prev_text: str | None = None
+                    for cell in row.cells:
+                        val = cell.text.strip()
+                        # python-docx repeats merged cells — deduplicate
+                        if val != prev_text:
+                            cells.append(val)
+                            prev_text = val
+                    if any(cells):
+                        row_lines.append(" | ".join(cells))
+                if row_lines:
+                    parts.append("\n".join(row_lines))
+
+        return "\n\n".join(p for p in parts if p)
 
     async def _extract_image(self, path: Path) -> ExtractionResult:
         """OCR a single image file."""

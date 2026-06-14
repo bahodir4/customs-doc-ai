@@ -76,7 +76,7 @@ st.caption(
 
 uploaded_files = st.file_uploader(
     "Drop files here or click to browse",
-    type=["pdf", "jpg", "jpeg", "png"],
+    type=["pdf", "docx", "jpg", "jpeg", "png"],
     accept_multiple_files=True,
     label_visibility="collapsed",
 )
