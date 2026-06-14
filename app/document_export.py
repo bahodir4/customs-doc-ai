@@ -14,6 +14,7 @@ UTF-8 (so Cyrillic / Uzbek chars don't get escaped).
 """
 from __future__ import annotations
 
+import csv
 import io
 import json
 from typing import Any
@@ -29,6 +30,35 @@ from openpyxl.utils import get_column_letter
 def to_json_bytes(data: dict[str, Any]) -> bytes:
     """UTF-8 JSON bytes, pretty-printed, with non-ASCII preserved."""
     return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+
+
+# ── CSV ─────────────────────────────────────────────────────────────
+
+
+def to_csv_bytes(data: dict[str, Any]) -> bytes:
+    """Flatten extracted data into a UTF-8 CSV (BOM for Excel auto-detection).
+
+    Scalar and primitive-list fields appear as Field/Value rows. Each list-of-
+    dicts field (e.g. line_items) gets its own section with a header row.
+    """
+    main_rows, list_fields = _split_main_and_lists(data)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Field", "Value"])
+    for row in main_rows:
+        writer.writerow([row["Field"], row["Value"]])
+
+    for key, items in list_fields.items():
+        if not items:
+            continue
+        writer.writerow([])
+        writer.writerow([f"[{key}]"])
+        df = _flatten_list_to_dataframe(items)
+        writer.writerow(list(df.columns))
+        for _, row_data in df.iterrows():
+            writer.writerow([str(v) if v != "" else "" for v in row_data])
+
+    return output.getvalue().encode("utf-8-sig")
 
 
 # ── Excel ───────────────────────────────────────────────────────────

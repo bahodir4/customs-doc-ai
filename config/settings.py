@@ -23,6 +23,23 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 ENV_FILE: Path = PROJECT_ROOT / ".env"
 
 
+class OpenAISettings(BaseSettings):
+    """OpenAI API settings (used when LLM_PROVIDER=openai)."""
+
+    model_config = SettingsConfigDict(
+        env_file=ENV_FILE,
+        env_file_encoding="utf-8",
+        env_prefix="OPENAI_",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    api_key: str = ""
+    chat_model: str = "gpt-4.1-mini"
+    temperature: float = 0.0
+    request_timeout: float = 60.0
+
+
 class OllamaSettings(BaseSettings):
     """Ollama (LLM + embeddings) connection settings."""
 
@@ -104,7 +121,7 @@ class RAGSettings(BaseSettings):
     )
 
     chunk_size: int = 500
-    chunk_overlap: int = 50
+    chunk_overlap: int = 100   # 20% overlap keeps cross-sentence context within a section
     top_k: int = 5
 
 
@@ -120,11 +137,13 @@ class AppSettings(BaseSettings):
 
     environment: Literal["dev", "prod"] = "dev"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    llm_provider: Literal["ollama", "openai"] = "ollama"
 
     project_root: Path = Field(default=PROJECT_ROOT)
     upload_dir: Path = Field(default=PROJECT_ROOT / "data" / "uploads")
 
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
+    openai: OpenAISettings = Field(default_factory=OpenAISettings)
     qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     rag: RAGSettings = Field(default_factory=RAGSettings)

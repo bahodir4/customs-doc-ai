@@ -1,21 +1,27 @@
 """Document processing pipeline.
 
-A LangGraph state machine: load → ocr → classify → extract → validate → store.
+A LangGraph state machine: load → ocr → classify → extract → store.
 
 Services are injected via closure so the pipeline is testable in isolation
 and decoupled from settings. Each node is async and returns a partial
 state update; LangGraph merges those into the running state.
 
-Error handling uses a guard pattern: any node that fails sets
-`status="error"` plus an `error_message`. Subsequent nodes short-circuit
-when they see `status == "error"`. The final `store` node always runs
-and persists whatever state we have — so even failed runs leave a
-queryable record for inspection.
+Extraction is schema-free: the LLM organises all document data into
+structured JSON using whatever groupings fit the document. This works for
+any document type without hardcoded field names or Pydantic schemas.
+
+Multi-page documents (≥ MAP_REDUCE_MIN_PAGES) use a two-phase approach:
+  Phase 1 — full-text call for header/summary fields.
+  Phase 2 — one parallel call per page for line items (more reliable
+             association of prices with items in complex multi-column layouts).
+  Phase 3 — deduplicate and merge per-page items into the header result.
 """
 from __future__ import annotations
 
+import asyncio
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.graph import END, StateGraph
@@ -24,15 +30,107 @@ from config import settings
 from core.logging import get_logger
 from core.pipeline.state import DocProcessingState
 from core.prompts import (
-    DOC_TYPES,
     get_classify_prompt,
     get_extraction_prompt,
+    get_page_items_prompt,
     normalise_classify_response,
 )
-from core.schemas import validate_and_parse
 from core.services import DBService, LLMService, OCRService, VectorStoreService
 
 logger = get_logger(__name__)
+
+# ── Map-reduce constants ──────────────────────────────────────────────────────
+
+# Apply map-reduce when the document has at least this many pages.
+_MAP_REDUCE_MIN_PAGES: Final[int] = 3
+
+# Page-boundary markers inserted by OCRService (e.g. "--- Page 2 ---" or
+# "--- Page 3 [OCR] ---").
+_PAGE_MARKER: re.Pattern[str] = re.compile(
+    r'---\s*Page\s+\d+(?:\s+\[[^\]]*\])?\s*---'
+)
+
+# Keys the organiser might use for the goods/line-items list.
+_ITEMS_KEYS: Final[tuple[str, ...]] = (
+    "goods", "line_items", "items", "goods_items", "products",
+)
+
+
+def _split_pages(raw_text: str) -> list[str]:
+    """Split OCR text on page-boundary markers into per-page strings."""
+    parts = _PAGE_MARKER.split(raw_text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+async def _extract_page_items(
+    llm: LLMService, page_text: str
+) -> list[dict[str, Any]]:
+    """Extract line items from a single page. Returns [] on any failure."""
+    try:
+        sys_p, usr_p = get_page_items_prompt(page_text)
+        result = await llm.complete_json(sys_p, usr_p)
+        items = result.get("items") or []
+        return [i for i in items if isinstance(i, dict)]
+    except Exception as exc:
+        logger.warning("Per-page item extraction failed: %s", exc)
+        return []
+
+
+async def _map_reduce_extract(
+    llm: LLMService,
+    full_text: str,
+    pages: list[str],
+) -> dict[str, Any]:
+    """Two-phase extraction for long multi-page documents.
+
+    Phase 1 — organise the full text (header fields, totals, parties, etc.).
+    Phase 2 — extract line items from each page in parallel.
+    Phase 3 — deduplicate by item identity and merge into the header result.
+    """
+    # Phase 1: full document organisation (gives us header + fallback items)
+    sys_p, usr_p = get_extraction_prompt(full_text)
+    organised: dict[str, Any] = await llm.complete_json(sys_p, usr_p)
+
+    # Phase 2: per-page item extraction (all pages concurrently)
+    page_results: list[list[dict]] = list(
+        await asyncio.gather(*[_extract_page_items(llm, pg) for pg in pages])
+    )
+
+    # Phase 3: deduplicate and merge
+    seen: set[str] = set()
+    merged: list[dict] = []
+    for page_items in page_results:
+        for item in page_items:
+            key = str(
+                item.get("item_code")
+                or item.get("article")
+                or item.get("description")
+                or ""
+            ).strip()
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            merged.append(item)
+
+    if merged:
+        # Replace whatever key the organiser used with the better per-page results
+        placed = False
+        for candidate in _ITEMS_KEYS:
+            if candidate in organised:
+                organised[candidate] = merged
+                placed = True
+                break
+        if not placed:
+            organised["goods"] = merged
+        logger.info(
+            "Map-reduce: %d pages → %d items merged",
+            len(pages), len(merged),
+        )
+    else:
+        logger.warning("Map-reduce: per-page extraction empty; keeping full-text items")
+
+    return organised
 
 
 def _build_chunker() -> RecursiveCharacterTextSplitter:
@@ -55,12 +153,12 @@ def build_doc_pipeline(
 ):
     """Build and compile the document-processing graph.
 
-    Returns a LangGraph `CompiledStateGraph`. Invoke with:
+    Returns a LangGraph CompiledStateGraph. Invoke with:
         result = await pipeline.ainvoke({"file_path": "..."})
     """
     chunker = _build_chunker()
 
-    # ── Nodes ────────────────────────────────────────────────────────
+    # ── Nodes ────────────────────────────────────────────────────────────────
 
     async def load_node(state: DocProcessingState) -> dict[str, Any]:
         path_str = state["file_path"]
@@ -78,7 +176,7 @@ def build_doc_pipeline(
 
     async def ocr_node(state: DocProcessingState) -> dict[str, Any]:
         if _is_error(state):
-            return {"status": "error"}  # no-op write — LangGraph requires ≥1 field
+            return {"status": "error"}
         try:
             result = await ocr.extract_text(state["file_path"])
             logger.info(
@@ -110,37 +208,30 @@ def build_doc_pipeline(
     async def extract_node(state: DocProcessingState) -> dict[str, Any]:
         if _is_error(state):
             return {"status": "error"}
-        doc_type = state.get("doc_type", "unknown")
-        if doc_type not in DOC_TYPES:
-            logger.info("Skipping extraction: no schema for %s", doc_type)
-            return {"extracted_data": {}, "validation_errors": []}
         try:
-            sys_p, usr_p = get_extraction_prompt(doc_type, state["raw_text"])
-            data = await llm.complete_json(sys_p, usr_p)
-            logger.info("Extracted %d top-level fields", len(data))
-            return {"extracted_data": data}
+            raw_text = state["raw_text"]
+            pages = _split_pages(raw_text)
+
+            if len(pages) >= _MAP_REDUCE_MIN_PAGES:
+                logger.info(
+                    "Map-reduce extraction: %d pages (doc_type=%s)",
+                    len(pages), state.get("doc_type"),
+                )
+                data = await _map_reduce_extract(llm, raw_text, pages)
+            else:
+                sys_p, usr_p = get_extraction_prompt(raw_text)
+                data = await llm.complete_json(sys_p, usr_p)
+
+            logger.info("Extraction complete: %d top-level keys", len(data))
+            return {"extracted_data": data, "validation_errors": []}
         except Exception as exc:
             logger.exception("Extraction failed")
             return {"status": "error", "error_message": f"Extract failed: {exc}"}
 
-    async def validate_node(state: DocProcessingState) -> dict[str, Any]:
-        if _is_error(state):
-            return {"status": "error"}
-        doc_type = state.get("doc_type")
-        data = state.get("extracted_data") or {}
-        if doc_type not in DOC_TYPES:
-            return {"validation_errors": []}
-        errors, cleaned = validate_and_parse(doc_type, data)
-        if errors:
-            logger.warning("Validation: %d error(s)", len(errors))
-        else:
-            logger.info("Validation: OK")
-        return {"extracted_data": cleaned, "validation_errors": errors}
-
     async def store_node(state: DocProcessingState) -> dict[str, Any]:
         """Always runs — persists state regardless of upstream errors."""
         is_error = _is_error(state)
-        final_status: str = "error" if is_error else "done"
+        final_status = "error" if is_error else "done"
         raw_text = state.get("raw_text") or ""
 
         try:
@@ -161,7 +252,6 @@ def build_doc_pipeline(
                 "error_message": f"Store failed: {exc}",
             }
 
-        # Only embed if we have text and the pipeline succeeded otherwise.
         if raw_text and not is_error:
             try:
                 chunks = chunker.split_text(raw_text)
@@ -170,8 +260,6 @@ def build_doc_pipeline(
                     await vector.upsert_doc_chunks(doc_id, chunks)
                     logger.info("Embedded %d chunks into doc_chunks", len(chunks))
             except Exception as exc:
-                # Embedding failure doesn't fail the run — the doc is saved,
-                # the user just loses semantic search for it.
                 logger.exception("Vector embed failed (doc still persisted)")
                 return {
                     "doc_id": doc_id,
@@ -181,22 +269,20 @@ def build_doc_pipeline(
 
         return {"doc_id": doc_id, "status": final_status}
 
-    # ── Assemble graph ───────────────────────────────────────────────
+    # ── Assemble graph ────────────────────────────────────────────────────────
 
     graph = StateGraph(DocProcessingState)
     graph.add_node("load", load_node)
     graph.add_node("ocr", ocr_node)
     graph.add_node("classify", classify_node)
     graph.add_node("extract", extract_node)
-    graph.add_node("validate", validate_node)
     graph.add_node("store", store_node)
 
     graph.set_entry_point("load")
     graph.add_edge("load", "ocr")
     graph.add_edge("ocr", "classify")
     graph.add_edge("classify", "extract")
-    graph.add_edge("extract", "validate")
-    graph.add_edge("validate", "store")
+    graph.add_edge("extract", "store")
     graph.add_edge("store", END)
 
     return graph.compile()

@@ -17,7 +17,7 @@ from app.components import (
     sidebar_brand,
     status_badge,
 )
-from app.document_export import to_excel_bytes, to_json_bytes
+from app.document_export import to_csv_bytes, to_excel_bytes, to_json_bytes
 from app.services import (
     delete_document,
     get_document,
@@ -163,7 +163,19 @@ else:
                 st.markdown(f"**{key}** ({len(value)} items)")
                 with st.container():
                     if value and isinstance(value[0], dict):
-                        st.dataframe(value, use_container_width=True, hide_index=True)
+                        # Flatten any nested list/dict cells to strings so Arrow
+                        # serialisation never fails (schema-free LLM output may
+                        # include list-valued columns like expiration_date).
+                        flat_rows = [
+                            {
+                                k: (", ".join(map(str, v)) if isinstance(v, list)
+                                    else str(v) if isinstance(v, dict)
+                                    else v)
+                                for k, v in row.items()
+                            }
+                            for row in value
+                        ]
+                        st.dataframe(flat_rows, use_container_width=True, hide_index=True)
                     else:
                         st.write(value)
             else:
@@ -192,7 +204,7 @@ else:
             st.markdown("---")
 
             # Action row
-            action_col_1, action_col_2, action_col_3, _ = st.columns([1, 1, 1, 3])
+            action_col_1, action_col_2, action_col_3, action_col_4, _ = st.columns([1, 1, 1, 1, 2])
             extracted = doc.get("extracted_data") or {}
             file_stem = Path(doc.get("file_name", "doc")).stem
 
@@ -221,6 +233,20 @@ else:
                     st.caption(f"_Excel error: {exc}_")
 
             with action_col_3:
+                try:
+                    csv_bytes = to_csv_bytes(extracted)
+                    st.download_button(
+                        "📋 CSV",
+                        data=csv_bytes,
+                        file_name=f"{file_stem}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        key=f"csv_{doc['id']}",
+                    )
+                except Exception as exc:
+                    st.caption(f"_CSV error: {exc}_")
+
+            with action_col_4:
                 if st.button(
                     "🗑️ Delete",
                     use_container_width=True,

@@ -29,7 +29,11 @@ class GTDLineItem(BaseModel):
     gross_weight_kg: Optional[float] = None
     net_weight_kg: Optional[float] = None
     quantity: Optional[float] = None
+    quantity_unit: Optional[str] = None
     statistical_value: Optional[float] = None
+    reference_documents: Optional[str] = Field(
+        default=None, description="Invoice numbers or other supporting docs cited"
+    )
 
 
 class GTDSchema(BaseModel):
@@ -53,13 +57,24 @@ class GTDSchema(BaseModel):
 
     country_of_dispatch: Optional[str] = Field(default=None, max_length=2)
     country_of_destination: Optional[str] = Field(default=None, max_length=2)
+    country_of_origin_goods: Optional[str] = Field(default=None, max_length=2)
 
     customs_office: Optional[str] = None
+    ucr_reference: Optional[str] = Field(
+        default=None, description="Unique Consignment Reference (box 12.08 on SAD)"
+    )
+    transport_means: Optional[str] = Field(
+        default=None, description="Vehicle registration or flight number"
+    )
+    transport_mode: Optional[str] = Field(
+        default=None, description="road, air, sea, or rail"
+    )
     incoterms: Optional[str] = None
 
     total_invoice_value: Optional[float] = None
     currency: Optional[str] = Field(default=None, max_length=3)
     total_gross_weight_kg: Optional[float] = None
+    total_net_weight_kg: Optional[float] = None
     total_packages: Optional[int] = None
 
     items: list[GTDLineItem] = Field(default_factory=list)

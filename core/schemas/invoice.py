@@ -25,6 +25,12 @@ class InvoiceSchema(BaseModel):
     invoice_date: Optional[str] = Field(
         default=None, description="Invoice date in ISO format YYYY-MM-DD"
     )
+    original_or_copy: Optional[str] = Field(
+        default=None, description="ORIGINAL or COPY"
+    )
+    contract_number: Optional[str] = Field(
+        default=None, description="Contract or purchase-order reference"
+    )
 
     seller: Party = Field(default_factory=Party)
     buyer: Party = Field(default_factory=Party)

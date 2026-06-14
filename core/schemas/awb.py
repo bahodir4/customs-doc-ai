@@ -28,6 +28,7 @@ class AWBSchema(BaseModel):
 
     shipper: Party = Field(default_factory=Party)
     consignee: Party = Field(default_factory=Party)
+    notify_party: Optional[Party] = None
 
     carrier: Optional[str] = Field(default=None, description="Airline / carrier name")
     iata_carrier_code: Optional[str] = Field(default=None, max_length=3)
@@ -37,6 +38,9 @@ class AWBSchema(BaseModel):
     )
     airport_of_destination: Optional[str] = Field(
         default=None, description="IATA airport code of destination"
+    )
+    routing_via: Optional[str] = Field(
+        default=None, description="Transit airports if any"
     )
 
     flight_number: Optional[str] = None
@@ -50,6 +54,19 @@ class AWBSchema(BaseModel):
     volume_m3: Optional[float] = None
 
     description_of_goods: Optional[str] = None
+    hs_codes: list[str] = Field(
+        default_factory=list,
+        description="HS codes listed on the AWB (e.g. '9027899000')",
+    )
+    packaging_details: Optional[str] = Field(
+        default=None,
+        description="Per-package dimensions / count (e.g. '14 AT 120x80x112 cm')",
+    )
+    special_handling: Optional[str] = Field(
+        default=None,
+        description="Temperature range, DG class, fragile, or other handling notes",
+    )
+
     declared_value_for_carriage: Optional[float] = None
     declared_value_for_customs: Optional[float] = None
     currency: Optional[str] = Field(default=None, max_length=3)

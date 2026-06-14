@@ -22,8 +22,9 @@ from typing import Final, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 
-from config.settings import OllamaSettings
+from config.settings import OllamaSettings, OpenAISettings
 from core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -65,20 +66,53 @@ class LLMResponseError(Exception):
 
 
 class LLMService:
-    """Async wrapper around the Ollama LLM."""
+    """Async wrapper around the LLM — Ollama or OpenAI, selected at construction."""
 
-    def __init__(self, settings: OllamaSettings) -> None:
-        self._settings = settings
+    def __init__(
+        self,
+        ollama_settings: OllamaSettings,
+        openai_settings: OpenAISettings | None = None,
+        provider: str = "ollama",
+    ) -> None:
+        self._provider = provider
+
+        if provider == "openai":
+            if not openai_settings or not openai_settings.api_key:
+                logger.warning(
+                    "LLM_PROVIDER=openai but OPENAI_API_KEY is not set — "
+                    "falling back to Ollama."
+                )
+                provider = "ollama"
+            else:
+                self._client = ChatOpenAI(
+                    model=openai_settings.chat_model,
+                    api_key=openai_settings.api_key,
+                    temperature=openai_settings.temperature,
+                    timeout=openai_settings.request_timeout,
+                )
+                logger.info(
+                    "LLMService ready (provider=openai, model=%s)",
+                    openai_settings.chat_model,
+                )
+                return
+
+        # Ollama (default or fallback)
+        client_kwargs: dict = (
+            {"headers": {"ngrok-skip-browser-warning": "true"}}
+            if "ngrok" in ollama_settings.base_url
+            else {}
+        )
         self._client = ChatOllama(
-            base_url=settings.base_url,
-            model=settings.chat_model,
-            temperature=settings.temperature,
-            timeout=settings.request_timeout,
+            base_url=ollama_settings.base_url,
+            model=ollama_settings.chat_model,
+            temperature=ollama_settings.temperature,
+            timeout=ollama_settings.request_timeout,
+            client_kwargs=client_kwargs,
         )
         logger.info(
-            "LLMService ready (model=%s, base_url=%s)",
-            settings.chat_model,
-            settings.base_url,
+            "LLMService ready (provider=ollama, model=%s, base_url=%s)",
+            ollama_settings.chat_model,
+            ollama_settings.base_url,
         )
 
     # ── Primitives ───────────────────────────────────────────────────

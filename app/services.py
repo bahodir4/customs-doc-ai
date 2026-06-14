@@ -26,7 +26,11 @@ def get_services() -> _Services:
     """Build once, reuse across all Streamlit reruns."""
     return _Services(
         ocr=OCRService(language="en"),
-        llm=LLMService(settings.ollama),
+        llm=LLMService(
+            ollama_settings=settings.ollama,
+            openai_settings=settings.openai,
+            provider=settings.llm_provider,
+        ),
         vector=VectorStoreService(settings.qdrant, settings.ollama),
         db=DBService(settings.postgres),
     )

@@ -64,9 +64,9 @@ def build_chat_agent(
         }
 
     async def retrieve_rag_node(state: ChatState) -> dict[str, Any]:
-        """Regulation question: customs-law chunks only."""
-        hits = await vector.search_lex(state["user_input"], top_k=top_k)
-        logger.info("rag: %d lex chunks", len(hits))
+        """Regulation question: customs-law chunks + adjacent siblings for full context."""
+        hits = await vector.search_lex_with_context(state["user_input"], top_k=top_k)
+        logger.info("rag: %d lex chunks (after sibling expansion)", len(hits))
         return {
             "pg_documents": [],
             "doc_chunks": [],
@@ -77,9 +77,9 @@ def build_chat_agent(
         """Compliance question: pull from all three sources."""
         pg_docs = await _fetch_pg_documents(db, state)
         doc_hits = await vector.search_docs(state["user_input"], top_k=top_k)
-        lex_hits = await vector.search_lex(state["user_input"], top_k=top_k)
+        lex_hits = await vector.search_lex_with_context(state["user_input"], top_k=top_k)
         logger.info(
-            "hybrid: %d pg docs, %d doc chunks, %d lex chunks",
+            "hybrid: %d pg docs, %d doc chunks, %d lex chunks (after sibling expansion)",
             len(pg_docs), len(doc_hits), len(lex_hits),
         )
         return {
@@ -145,9 +145,11 @@ async def _fetch_pg_documents(
     db: DBService, state: ChatState
 ) -> list[dict[str, Any]]:
     doc_ids = state.get("context_doc_ids") or []
-    if not doc_ids:
-        return []
-    return await db.get_documents(doc_ids)
+    if doc_ids:
+        return await db.get_documents(doc_ids)
+    # No specific docs pinned — fall back to the 5 most recently processed docs
+    # so doc_qa and hybrid still have structured context to work with.
+    return await db.list_documents(limit=5)
 
 
 def _build_context(state: ChatState) -> str:

@@ -26,6 +26,7 @@ from qdrant_client.http.models import (
     Filter,
     MatchValue,
     PointStruct,
+    Range,
     VectorParams,
 )
 
@@ -64,9 +65,15 @@ class VectorStoreService:
             prefer_grpc=False,
             check_compatibility=False,
         )
+        embed_kwargs: dict = (
+            {"headers": {"ngrok-skip-browser-warning": "true"}}
+            if "ngrok" in ollama_settings.base_url
+            else {}
+        )
         self._embed = OllamaEmbeddings(
             base_url=ollama_settings.base_url,
             model=ollama_settings.embed_model,
+            client_kwargs=embed_kwargs,
         )
         logger.info(
             "VectorStoreService ready (qdrant=%s, embed_model=%s)",
@@ -196,6 +203,91 @@ class VectorStoreService:
     async def search_lex(self, query: str, top_k: int = 5) -> list[SearchHit]:
         """Semantic search over lex.uz customs-law chunks."""
         return await self._search(self._qs.lex_collection, query, top_k, query_filter=None)
+
+    async def search_lex_with_context(
+        self,
+        query: str,
+        top_k: int = 5,
+        sibling_window: int = 1,
+    ) -> list[SearchHit]:
+        """Semantic search over lex.uz with sibling-chunk context expansion.
+
+        After vector search finds the top-K seed hits, this method fetches
+        adjacent chunks (same source + breadcrumb, chunk_index ± sibling_window)
+        via a Qdrant scroll filter.  All unique chunks are sorted into document
+        order before being returned, so the LLM always receives complete article
+        text rather than an isolated middle fragment.
+        """
+        seed_hits = await self._search(
+            self._qs.lex_collection, query, top_k, query_filter=None
+        )
+        if not seed_hits or sibling_window == 0:
+            return seed_hits
+
+        # keyed by (source, chunk_index) to deduplicate
+        merged: dict[tuple, SearchHit] = {}
+
+        for hit in seed_hits:
+            source = hit.metadata.get("source", "")
+            breadcrumb = hit.metadata.get("breadcrumb", "")
+            chunk_index = hit.metadata.get("chunk_index")
+
+            if chunk_index is None:
+                merged[(source, id(hit))] = hit  # no index — keep as-is
+                continue
+
+            merged[(source, chunk_index)] = hit
+
+            # Fetch siblings from Qdrant without re-embedding a query
+            min_idx = max(0, chunk_index - sibling_window)
+            max_idx = chunk_index + sibling_window
+
+            filters = [
+                FieldCondition(key="source", match=MatchValue(value=source)),
+                FieldCondition(
+                    key="chunk_index",
+                    range=Range(gte=float(min_idx), lte=float(max_idx)),
+                ),
+            ]
+            if breadcrumb:
+                filters.append(
+                    FieldCondition(key="breadcrumb", match=MatchValue(value=breadcrumb))
+                )
+
+            records, _ = await self._client.scroll(
+                collection_name=self._qs.lex_collection,
+                scroll_filter=Filter(must=filters),
+                limit=sibling_window * 2 + 1,
+                with_payload=True,
+                with_vectors=False,
+            )
+
+            for rec in records:
+                if not rec.payload:
+                    continue
+                idx = rec.payload.get("chunk_index", 0)
+                key = (rec.payload.get("source", ""), idx)
+                if key not in merged:
+                    merged[key] = SearchHit(
+                        text=str(rec.payload.get("text", "")),
+                        # siblings inherit a slightly lower score
+                        score=hit.score * 0.85,
+                        metadata={
+                            k: v for k, v in rec.payload.items() if k != "text"
+                        },
+                    )
+
+        # Return in document order: sorted by (source, chunk_index)
+        def _order(kv: tuple) -> tuple:
+            (src, idx), _ = kv
+            return (src, idx if isinstance(idx, (int, float)) else float("inf"))
+
+        ordered = [hit for _, hit in sorted(merged.items(), key=_order)]
+        logger.info(
+            "search_lex_with_context: %d seed hits expanded to %d chunks",
+            len(seed_hits), len(ordered),
+        )
+        return ordered
 
     async def _search(
         self,
