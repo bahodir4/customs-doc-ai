@@ -330,6 +330,51 @@ pytest tests/test_rag_chunking.py tests/test_rag_loaders.py tests/test_rag_inges
 pytest tests/test_rag_ingestion.py --run-integration -v
 ```
 
+## Phase 6 — Streamlit UI
+
+A modern chat-app UI on top of all the previous phases.
+
+### Running it
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Open `http://localhost:8501` in a browser.
+
+### Pages
+
+| Page | What it does |
+|---|---|
+| 💬 **Chat** (default) | ChatGPT-style chat with message bubbles, document-scope filter in sidebar, live system-status pills, language/intent/source indicators after each answer. |
+| 📄 **Documents** | Drag-and-drop upload (PDF/JPG/PNG), step-by-step pipeline status per file, per-document Fields & Raw JSON tabs, **JSON + Excel download buttons**, delete. |
+| 📚 **Knowledge Base** | Ingest single URL or file, run the bulk DOCX → markdown → ingest workflow (with auto-cleanup), wipe the lex_uz collection. |
+
+### "Smart" Excel export
+
+Each document downloads as a multi-sheet `.xlsx`:
+
+- **Document** sheet: flat `Field / Value` table with nested objects flattened via dot-notation (e.g. `seller.name`, `seller.country`).
+- **Line Items / Items** sheet (etc.): one sheet per list-valued field, one row per item, with the inner dict columns expanded.
+- Bold header row, auto-fit column widths, frozen top row.
+
+### Architecture
+
+```
+streamlit_app.py        # Chat page (default entry point)
+pages/
+├── 2_📄_Documents.py
+└── 3_📚_Knowledge_Base.py
+app/
+├── async_runner.py     # one persistent event loop for asyncpg/httpx/qdrant
+├── services.py         # @st.cache_resource singletons of services + pipelines
+├── styles.py           # custom CSS (typography, chat bubbles, file uploader, etc.)
+├── components.py       # reusable UI: status pills, empty states, badges
+└── document_export.py  # JSON + multi-sheet Excel helpers (pure logic, tested)
+```
+
+The async clients (Ollama, Qdrant, asyncpg) all live on one persistent event loop kept alive via `@st.cache_resource`, so they survive Streamlit's per-interaction reruns without cross-loop errors.
+
 ## Roadmap
 
 | Phase | Scope | Status |
@@ -338,6 +383,6 @@ pytest tests/test_rag_ingestion.py --run-integration -v
 | 2 | Core services (OCR, LLM, vector, DB) | done |
 | 3 | Schemas & prompts | done |
 | 4 | LangGraph pipelines | done |
-| 5 | RAG ingestion (URL / DOCX / MD) | done |
-| 6 | Streamlit UI | pending |
+| 5 | RAG ingestion (URL / DOCX / MD + bulk workflow) | done |
+| 6 | Streamlit UI | done |
 | 7 | Hardening & demo | pending |

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from config.settings import PostgresSettings
@@ -89,7 +90,7 @@ class DBService:
         self._engine: AsyncEngine = create_async_engine(
             settings.dsn,
             echo=echo,
-            pool_pre_ping=True,
+            poolclass=NullPool,  # no pool — safe across asyncio.run() calls
         )
         self._session_factory = async_sessionmaker(
             self._engine,
