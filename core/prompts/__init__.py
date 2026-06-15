@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Final
 
 from core.prompts.classify import CLASSIFY_SYSTEM, classify_prompt
+from core.prompts.correct import CORRECTION_SYSTEM, correction_prompt
 from core.prompts.organize import (
     ORGANIZE_SYSTEM,
     PAGE_ORGANIZE_SYSTEM,
@@ -44,6 +45,11 @@ def get_page_items_prompt(page_text: str) -> tuple[str, str]:
     return PAGE_ORGANIZE_SYSTEM, page_organize_prompt(page_text)
 
 
+def get_correction_prompt(raw_text: str) -> tuple[str, str]:
+    """Return (system, user) for OCR text correction."""
+    return CORRECTION_SYSTEM, correction_prompt(raw_text)
+
+
 def get_classify_prompt(raw_text: str) -> tuple[str, str]:
     """Return (system, user) for document classification."""
     return CLASSIFY_SYSTEM, classify_prompt(raw_text)
@@ -65,6 +71,7 @@ __all__ = [
     "CLASSIFY_LABELS",
     "DOC_TYPES",
     "get_classify_prompt",
+    "get_correction_prompt",
     "get_extraction_prompt",
     "get_ocr_quality_prompt",
     "get_page_items_prompt",

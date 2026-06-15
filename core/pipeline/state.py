@@ -30,6 +30,9 @@ class DocProcessingState(TypedDict, total=False):
     ocr_pages: int
     ocr_used: bool
 
+    # ── Set by correct_node ──────────────────────────────────────────
+    corrected_text: str  # LLM-cleaned version of raw_text; falls back to raw_text
+
     # ── Set by quality_node ──────────────────────────────────────────
     ocr_quality: dict[str, Any]  # {"rating": "GOOD"|"DEGRADED"|"UNREADABLE", ...}
 

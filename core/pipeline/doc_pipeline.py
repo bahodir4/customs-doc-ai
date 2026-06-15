@@ -31,6 +31,7 @@ from core.logging import get_logger
 from core.pipeline.state import DocProcessingState
 from core.prompts import (
     get_classify_prompt,
+    get_correction_prompt,
     get_extraction_prompt,
     get_ocr_quality_prompt,
     get_page_items_prompt,
@@ -193,32 +194,76 @@ def build_doc_pipeline(
             logger.exception("OCR failed")
             return {"status": "error", "error_message": f"OCR failed: {exc}"}
 
+    async def correct_node(state: DocProcessingState) -> dict[str, Any]:
+        """Use the LLM to fix OCR errors in raw_text and return corrected_text.
+
+        Falls back to raw_text unchanged if the LLM call fails, so the rest
+        of the pipeline is never blocked by a correction failure.
+        """
+        if _is_error(state):
+            return {}
+        raw = state.get("raw_text", "")
+        try:
+            sys_p, usr_p = get_correction_prompt(raw)
+            corrected = await llm.complete(sys_p, usr_p)
+            corrected = corrected.strip()
+            if not corrected:
+                corrected = raw
+            logger.info(
+                "OCR correction: raw=%d chars → corrected=%d chars",
+                len(raw), len(corrected),
+            )
+            return {"corrected_text": corrected}
+        except Exception as exc:
+            logger.warning("OCR correction failed, using raw text: %s", exc)
+            return {"corrected_text": raw}
+
     async def quality_node(state: DocProcessingState) -> dict[str, Any]:
         if _is_error(state):
             return {}
-        try:
-            sys_p, usr_p = get_ocr_quality_prompt(state.get("raw_text", ""))
-            result = await llm.complete_json(sys_p, usr_p)
-            quality = {
+
+        def _parse(result: dict, label: str) -> dict:
+            q = {
                 "rating": result.get("rating", "UNKNOWN"),
                 "confidence": float(result.get("confidence", 0.0)),
                 "readable_pct": int(result.get("readable_pct", 0)),
                 "issues": result.get("issues") or [],
             }
             logger.info(
-                "OCR quality: %s (confidence=%.2f, readable=%d%%)",
-                quality["rating"], quality["confidence"], quality["readable_pct"],
+                "OCR quality [%s]: %s (readable=%d%%)",
+                label, q["rating"], q["readable_pct"],
             )
-            return {"ocr_quality": quality}
+            return q
+
+        raw_text = state.get("raw_text", "")
+        corrected_text = state.get("corrected_text") or raw_text
+
+        try:
+            sys_p_raw, usr_p_raw = get_ocr_quality_prompt(raw_text)
+            sys_p_cor, usr_p_cor = get_ocr_quality_prompt(corrected_text)
+            raw_result, cor_result = await asyncio.gather(
+                llm.complete_json(sys_p_raw, usr_p_raw),
+                llm.complete_json(sys_p_cor, usr_p_cor),
+            )
+            quality = {
+                "raw": _parse(raw_result, "raw"),
+                "corrected": _parse(cor_result, "corrected"),
+            }
         except Exception as exc:
             logger.warning("OCR quality check failed: %s", exc)
-            return {"ocr_quality": {"rating": "UNKNOWN", "issues": [str(exc)]}}
+            quality = {
+                "raw": {"rating": "UNKNOWN", "issues": [str(exc)]},
+                "corrected": {"rating": "UNKNOWN", "issues": []},
+            }
+
+        return {"ocr_quality": quality}
 
     async def classify_node(state: DocProcessingState) -> dict[str, Any]:
         if _is_error(state):
             return {"status": "error"}
         try:
-            sys_p, usr_p = get_classify_prompt(state["raw_text"])
+            text = state.get("corrected_text") or state["raw_text"]
+            sys_p, usr_p = get_classify_prompt(text)
             raw = await llm.complete(sys_p, usr_p)
             doc_type = normalise_classify_response(raw)
             logger.info("Classified as: %s (raw=%r)", doc_type, raw[:50])
@@ -231,17 +276,17 @@ def build_doc_pipeline(
         if _is_error(state):
             return {"status": "error"}
         try:
-            raw_text = state["raw_text"]
-            pages = _split_pages(raw_text)
+            text = state.get("corrected_text") or state["raw_text"]
+            pages = _split_pages(text)
 
             if len(pages) >= _MAP_REDUCE_MIN_PAGES:
                 logger.info(
                     "Map-reduce extraction: %d pages (doc_type=%s)",
                     len(pages), state.get("doc_type"),
                 )
-                data = await _map_reduce_extract(llm, raw_text, pages)
+                data = await _map_reduce_extract(llm, text, pages)
             else:
-                sys_p, usr_p = get_extraction_prompt(raw_text)
+                sys_p, usr_p = get_extraction_prompt(text)
                 data = await llm.complete_json(sys_p, usr_p)
 
             logger.info("Extraction complete: %d top-level keys", len(data))
@@ -302,6 +347,7 @@ def build_doc_pipeline(
     graph = StateGraph(DocProcessingState)
     graph.add_node("load", load_node)
     graph.add_node("ocr", ocr_node)
+    graph.add_node("correct", correct_node)
     graph.add_node("quality", quality_node)
     graph.add_node("classify", classify_node)
     graph.add_node("extract", extract_node)
@@ -309,7 +355,8 @@ def build_doc_pipeline(
 
     graph.set_entry_point("load")
     graph.add_edge("load", "ocr")
-    graph.add_edge("ocr", "quality")
+    graph.add_edge("ocr", "correct")
+    graph.add_edge("correct", "quality")
     graph.add_edge("quality", "classify")
     graph.add_edge("classify", "extract")
     graph.add_edge("extract", "store")

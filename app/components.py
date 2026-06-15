@@ -136,26 +136,39 @@ def doc_type_badge(doc_type: str) -> str:
 
 
 def ocr_quality_badge(quality: dict | None) -> str:
-    """Return badge HTML for an OCR quality assessment dict."""
+    """Return badge HTML for an OCR quality dict (supports raw/corrected structure)."""
     if not quality:
         return ""
+
+    _RATING_MAP = {
+        "GOOD":       ("tag-success", "Good"),
+        "DEGRADED":   ("tag-warn",    "Degraded"),
+        "UNREADABLE": ("tag-error",   "Unreadable"),
+        "UNKNOWN":    ("",            "?"),
+    }
+
+    # New structure: {"raw": {...}, "corrected": {...}}
+    if "raw" in quality and "corrected" in quality:
+        raw = quality["raw"]
+        cor = quality["corrected"]
+        r_rating = (raw.get("rating") or "UNKNOWN").upper()
+        c_rating = (cor.get("rating") or "UNKNOWN").upper()
+        r_pct = raw.get("readable_pct", "")
+        c_pct = cor.get("readable_pct", "")
+        r_cls, r_lbl = _RATING_MAP.get(r_rating, ("", r_rating))
+        c_cls, c_lbl = _RATING_MAP.get(c_rating, ("", c_rating))
+        tip = f"Raw: {r_pct}% → Corrected: {c_pct}%"
+        # Badge colour driven by the raw scan quality
+        badge_cls = r_cls
+        label = f"🔬 {r_lbl} → {c_lbl}"
+        return f'<span class="tag {badge_cls}" title="{tip}">{label}</span>'
+
+    # Legacy single-assessment structure
     rating = (quality.get("rating") or "UNKNOWN").upper()
     pct = quality.get("readable_pct")
-    issues = quality.get("issues") or []
-    label_map = {
-        "GOOD":        ("tag-success", "🔬 OCR: Good"),
-        "DEGRADED":    ("tag-warn",    "🔬 OCR: Degraded"),
-        "UNREADABLE":  ("tag-error",   "🔬 OCR: Unreadable"),
-        "UNKNOWN":     ("",            "🔬 OCR: ?"),
-    }
-    cls, label = label_map.get(rating, ("", f"🔬 OCR: {rating}"))
-    detail = ""
-    if pct is not None:
-        detail = f" {pct}%"
-    if issues:
-        tip = ", ".join(str(i) for i in issues[:3])
-        detail += f" — {tip}"
-    return f'<span class="tag {cls}" title="{detail.strip()}">{label}</span>'
+    cls, lbl = _RATING_MAP.get(rating, ("", rating))
+    tip = f"{pct}%" if pct is not None else ""
+    return f'<span class="tag {cls}" title="{tip}">🔬 OCR: {lbl}</span>'
 
 
 def doc_card_header(doc: dict) -> str:

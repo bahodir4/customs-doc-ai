@@ -1,388 +1,309 @@
 # customs-doc-ai
 
-Local AI document intelligence platform for Uzbekistan customs documents
-(invoices, AWB, GTD, CMR, packing lists). Fully self-hosted — no external APIs.
+Self-hosted AI platform for Uzbekistan customs document processing and law retrieval.
+Processes trade documents (invoices, AWBs, GTDs, CMRs, packing lists), corrects OCR errors,
+evaluates scan quality, extracts structured data, and answers questions in Uzbek, Russian, and English —
+all running locally with no external API calls required.
+
+---
 
 ## Stack
 
-- **LLM**: Qwen 2.5 via Ollama
-- **Embeddings**: BGE-M3 (multilingual UZ / RU / EN)
-- **Vector store**: Qdrant
-- **Database**: PostgreSQL (async)
-- **Orchestration**: LangGraph + LangChain
-- **OCR**: PaddleOCR + PyMuPDF
-- **UI**: Streamlit
+| Layer | Technology |
+|---|---|
+| LLM | Ollama (default: `qwen2.5:7b`) or OpenAI (`gpt-4.1-mini`) |
+| Embeddings | `bge-m3` via Ollama — multilingual UZ / RU / EN |
+| Vector store | Qdrant (two collections: `doc_chunks`, `lex_uz`) |
+| Structured store | PostgreSQL 16 via async SQLAlchemy + asyncpg |
+| Orchestration | LangGraph state machines + LangChain |
+| OCR | PyMuPDF (native text) with PaddleOCR fallback for scans |
+| UI | Streamlit 1.36+ |
 
-## Phase 1 — Infrastructure setup
+---
 
-### 1. Prerequisites
+## Quick start
+
+### Prerequisites
 
 - Docker Engine 24+ and Docker Compose v2
 - Python 3.11+
-- ~10 GB free disk (for models and Postgres data)
+- ~10 GB free disk (models + Postgres data)
+- macOS/Linux (Windows via WSL2)
 
-### 2. Bootstrap
+### 1. Clone and configure
 
 ```bash
 git clone <repo-url> customs-doc-ai
 cd customs-doc-ai
 
-# Configuration
-cp .env.example .env
+cp .env.example .env          # edit if needed (defaults work for local dev)
 
-# Python environment
 python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+```
 
-# Infrastructure
-docker compose up -d
+### 2. Start infrastructure
 
-# Pull models (first run only — downloads ~10 GB)
-docker exec customs-ollama ollama pull qwen2.5:7b
-docker exec customs-ollama ollama pull bge-m3
+```bash
+docker compose up -d          # starts Qdrant + PostgreSQL
+```
 
-# Verify everything is healthy
-python scripts/verify_services.py
+> **Apple Silicon (M1/M2/M3):** run Ollama natively for Metal GPU acceleration:
+> ```bash
+> brew install ollama && brew services start ollama
+> ```
+> On Linux/Windows the Docker-bundled Ollama works fine. Either way, raise Docker Desktop
+> memory to at least 12 GB (Settings → Resources → Memory) if keeping Ollama in Docker.
+
+### 3. Pull models
+
+```bash
+ollama pull qwen2.5:7b        # LLM (~4.7 GB)
+ollama pull bge-m3            # embeddings (~1.2 GB)
+```
+
+### 4. Initialise and verify
+
+```bash
+python scripts/init_db.py         # create PostgreSQL tables (run once)
+python scripts/verify_services.py # confirm Qdrant, Postgres, Ollama are healthy
 ```
 
 Expected output:
-
 ```
-Checking infrastructure services...
-
-  [OK] Qdrant       reachable at http://localhost:6333
-  [OK] PostgreSQL   PostgreSQL 16.x
-  [OK] Ollama       2 model(s): qwen2.5:7b, bge-m3
-
+[OK] Qdrant       reachable at http://localhost:6333
+[OK] PostgreSQL   PostgreSQL 16.x
+[OK] Ollama       2 model(s): qwen2.5:7b, bge-m3
 All services healthy.
 ```
 
-### 3. Project layout
-
-```
-customs-doc-ai/
-├── config/      # Pydantic settings
-├── core/        # Services, schemas, prompts, pipelines
-├── rag/         # lex.uz knowledge base
-├── app/         # Streamlit UI
-├── scripts/     # CLI utilities
-├── tests/       # Unit & integration tests
-└── data/        # Docker volumes (gitignored)
-```
-
-## Phase 2 — Core services
-
-Four independent, async, dependency-injected service classes:
-
-| Service | Responsibility |
-|---|---|
-| `OCRService` | Smart PDF text extraction with PaddleOCR fallback for scans |
-| `LLMService` | Qwen / Ollama wrapper: `complete`, `complete_json`, `detect_language`, `detect_intent`, `chat` |
-| `VectorStoreService` | Async Qdrant client with two collections (`doc_chunks`, `lex_uz`) |
-| `DBService` | Async SQLAlchemy persistence for processed documents |
-
-### Initialise the database
-
-```bash
-python scripts/init_db.py
-```
-
-### Run the smoke tests
-
-```bash
-# Unit-style tests only (no services needed) — 8 tests, ~50 ms
-pytest
-
-# Full smoke suite (requires Qdrant, Postgres, Ollama up) — 28 tests
-pytest --run-integration -v
-```
-
-## Platform notes
-
-### Apple Silicon (M1 / M2 / M3 Mac) — recommended setup
-
-Running Ollama inside Docker on Mac is **not recommended** for two reasons:
-
-1. **Memory** — Docker Desktop's VM is capped (8 GB by default). A 7B model
-   needs ~6 GB of weights plus ~2 GB of KV cache, leaving nothing for
-   Qdrant + Postgres. You will see `llama-server process has terminated:
-   signal: killed` — the OS OOM killer at work.
-2. **GPU** — Docker on Mac has no access to Apple's Metal GPU. Inference
-   runs CPU-only and is ~5x slower than native.
-
-**Recommended: run Ollama natively, keep Qdrant + Postgres in Docker.**
-
-```bash
-# 1. Stop the Dockerised Ollama (if it was started before)
-docker compose stop ollama
-docker compose rm -f ollama
-
-# 2. Install native Ollama
-brew install ollama
-brew services start ollama   # auto-starts on boot
-
-# 3. Pull models (same names, faster download via Metal-aware Ollama)
-ollama pull qwen2.5:7b
-ollama pull bge-m3
-
-# 4. Verify — the code calls localhost:11434 either way, no changes needed
-python scripts/verify_services.py
-```
-
-If you want to keep Ollama in Docker, raise Docker Desktop's memory limit
-to **at least 12 GB** (Settings → Resources → Memory) and use a smaller
-model like `qwen2.5:3b` (1.9 GB) by setting `OLLAMA_CHAT_MODEL=qwen2.5:3b`
-in your `.env`.
-
-### Linux / Windows
-
-The default `docker compose up -d` is fine — all three services run in
-containers without issue.
-
-## Phase 3 — Schemas & prompts
-
-Pydantic schemas and extraction prompts for every supported document type:
-
-| Doc type | Schema | Prompt | Mandatory field |
-|---|---|---|---|
-| `invoice` | `InvoiceSchema` (nested seller/buyer/line_items/bank) | `invoice_prompt` | `invoice_number` |
-| `awb` | `AWBSchema` | `awb_prompt` | `awb_number` |
-| `gtd` | `GTDSchema` (with `GTDLineItem`) | `gtd_prompt` | `declaration_number` |
-| `cmr` | `CMRSchema` | `cmr_prompt` | `cmr_number` |
-| `packing_list` | `PackingListSchema` (with `PackageItem`) | `packing_list_prompt` | `packing_list_number` |
-
-Plus a `classify` prompt that maps raw OCR text → one of `invoice / awb / gtd / cmr / packing_list / letter / unknown`.
-
-### Try extraction end-to-end
-
-```bash
-# Auto-classify then extract
-python scripts/extract_sample.py tests/samples/invoice.pdf
-
-# Skip classification and force a doc type
-python scripts/extract_sample.py tests/samples/awb.jpg --type awb
-
-# Write JSON to a file instead of stdout
-python scripts/extract_sample.py tests/samples/gtd.jpg -o gtd.json
-```
-
-### Run the Phase 3 tests
-
-```bash
-# 55 unit tests (Pydantic + prompt registry) — ~0.1 s, no LLM needed
-pytest tests/test_schemas.py tests/test_prompts.py -v
-
-# 4 end-to-end integration tests (classify + extract roundtrips)
-pytest tests/test_extraction.py --run-integration -v
-```
-
-## Phase 4 — LangGraph pipelines
-
-Two compiled state machines that orchestrate Phase 2 services + Phase 3
-prompts/schemas:
-
-### Document processing pipeline
-
-```
-load → ocr → classify → extract → validate → store
-```
-
-- Linear flow, async throughout, services injected via closure.
-- Error-guard pattern: failure in any node sets `status="error"`; downstream
-  nodes short-circuit, but `store` always runs so a record exists for inspection.
-- Embeds OCR text into Qdrant `doc_chunks` after successful save.
-
-### Chat agent graph
-
-```
-detect_language → detect_intent → [route by intent] → respond
-                                       │
-                                       ├── doc_qa  → retrieve_doc_qa
-                                       ├── rag     → retrieve_rag
-                                       └── hybrid  → retrieve_hybrid
-```
-
-- Conditional routing on the detected intent picks one of three retrieval
-  strategies: PostgreSQL + doc_chunks, lex_uz only, or all three sources.
-- Single `respond` node receives any path and generates the answer in
-  the user's detected language.
-
-### Run the pipelines
-
-```bash
-# Process a document end-to-end (writes to Postgres + Qdrant)
-python scripts/process_document.py "docs/sample_files/Final INVOICES .pdf"
-
-# Ask the chat agent a question
-python scripts/chat_with_docs.py "What is the duty on medical devices?"
-python scripts/chat_with_docs.py "Какова сумма счёта?" --doc-ids <doc_id>
-```
-
-### Run the Phase 4 tests
-
-```bash
-# 12 pure-unit tests (graph helpers + context builders) — ~0.1 s
-pytest tests/test_doc_pipeline.py tests/test_chat_agent.py -v
-
-# 5 integration tests (full pipelines against live services)
-pytest tests/test_doc_pipeline.py tests/test_chat_agent.py --run-integration -v
-```
-
-## Phase 5 — RAG ingestion (URL / DOCX / Markdown)
-
-Smart hierarchical ingestion into the `lex_uz` Qdrant collection.
-
-### Input formats
-
-| Type | Loader | How |
-|---|---|---|
-| URL  | `URLLoader` | httpx fetch + strip nav/footer/scripts + `markdownify` ATX headings |
-| DOCX | `DocxLoader` | `python-docx` walks paragraphs; styles `Heading 1/2/3` and `Заголовок 1/2/3` map to `#/##/###` |
-| MD/TXT | `MarkdownFileLoader` | Pass-through |
-
-### Smart chunking strategy
-
-Two-stage chunking in `HierarchicalChunker`:
-
-1. **Header split** — `MarkdownHeaderTextSplitter` carves the document at
-   `#`, `##`, `###` boundaries, each piece tagged with its header path.
-2. **Size split** — sections over ~1.5× chunk_size are sub-split by
-   `RecursiveCharacterTextSplitter`; sub-chunks inherit parent headers.
-
-**Key trick:** each chunk's text starts with its full header path
-(`# Customs Code\n## Article 5: Medical Devices\n\n...body...`) so the
-embedding carries section context. A query about "Article 5" matches even
-if the body itself doesn't repeat the article number.
-
-Metadata stored alongside the vector:
-- `h1`, `h2`, `h3` — heading hierarchy
-- `breadcrumb` — `"Customs Code > Article 5: Medical Devices"`
-- `source` — original URL or file path
-- `chunk_index` — position within the source
-
-### Ingest content
-
-**Option A — bulk workflow with cleanup (recommended for lex.uz DOCX downloads):**
-
-```bash
-# 1. Download .docx files from lex.uz manually and drop them in:
-#    docs/lex_uz/originals/
-#
-# 2. Run the bulk workflow:
-python scripts/ingest_lex_docs.py
-```
-
-For each file, the workflow will:
-1. Convert it to markdown (saved to `docs/lex_uz/markdown/`)
-2. Ingest into the `lex_uz` Qdrant collection (with hierarchical chunking)
-3. **On success**, delete both the original and the converted MD
-4. **On failure**, leave both files in place for inspection
-
-This means partial failures are recoverable — just re-run after fixing whatever
-broke; only failed files get retried.
-
-Flags:
-- `--no-delete` — keep both files even after successful ingest (debugging)
-- `--originals-dir PATH` — custom source directory
-- `--markdown-dir PATH` — custom staging directory
-
-**Option B — one-shot from arbitrary source (URL / DOCX / MD / TXT):**
-
-```bash
-# Single URL
-python scripts/ingest_lex.py https://lex.uz/docs/3062271
-
-# Multiple sources, mixed
-python scripts/ingest_lex.py \
-    docs/customs_code.docx \
-    notes/medical_devices.md \
-    https://some-static-site.example.com/article
-```
-
-(Note: lex.uz pages are JavaScript-rendered so the URL path won't extract
-the actual customs text — use the DOCX export and Option A instead.)
-
-**Wipe and re-ingest:**
-
-```bash
-python scripts/clear_lex.py
-python scripts/ingest_lex_docs.py
-```
-
-### Test the chat agent against ingested content
-
-```bash
-python scripts/chat_with_docs.py "What is the customs duty on medical devices?"
-python scripts/chat_with_docs.py "Какова ставка пошлины на код 3822?"
-```
-
-The chat agent (Phase 4) automatically picks up the ingested content via
-`VectorStoreService.search_lex()` — no code changes needed.
-
-### Run the Phase 5 tests
-
-```bash
-# 30 unit tests (chunking + loaders + dispatch) — ~1 s, no LLM needed
-pytest tests/test_rag_chunking.py tests/test_rag_loaders.py tests/test_rag_ingestion.py -v
-
-# 4 integration tests (full ingestion + search round-trip)
-pytest tests/test_rag_ingestion.py --run-integration -v
-```
-
-## Phase 6 — Streamlit UI
-
-A modern chat-app UI on top of all the previous phases.
-
-### Running it
+### 5. Launch the UI
 
 ```bash
 streamlit run streamlit_app.py
 ```
 
-Open `http://localhost:8501` in a browser.
+Open `http://localhost:8501`.
 
-### Pages
+---
 
-| Page | What it does |
+## Document processing pipeline
+
+Every uploaded document passes through a 7-stage LangGraph pipeline:
+
+```
+load → ocr → correct → quality → classify → extract → store
+```
+
+| Stage | What happens |
 |---|---|
-| 💬 **Chat** (default) | ChatGPT-style chat with message bubbles, document-scope filter in sidebar, live system-status pills, language/intent/source indicators after each answer. |
-| 📄 **Documents** | Drag-and-drop upload (PDF/JPG/PNG), step-by-step pipeline status per file, per-document Fields & Raw JSON tabs, **JSON + Excel download buttons**, delete. |
-| 📚 **Knowledge Base** | Ingest single URL or file, run the bulk DOCX → markdown → ingest workflow (with auto-cleanup), wipe the lex_uz collection. |
+| **load** | Validate file exists, detect type (pdf / jpg / png / docx) |
+| **ocr** | PyMuPDF extracts native text; PaddleOCR used as fallback for scanned images |
+| **correct** | LLM fixes OCR errors: character substitutions (`v1EDICAL→MEDICAL`), broken words, garbled Cyrillic/Latin noise, stamp/signature artefacts — without adding or translating content |
+| **quality** | LLM rates corrected text as `GOOD` / `DEGRADED` / `UNREADABLE`, reports readable %, and lists detected issue types (`garbled_words`, `broken_numbers`, `character_subs`, etc.) |
+| **classify** | LLM classifies into `invoice / awb / gtd / cmr / packing_list / letter / unknown` |
+| **extract** | Schema-free LLM extraction into structured JSON sections (`references`, `parties`, `goods`, `financials`, `logistics`, `customs`). Multi-page docs use map-reduce: full-text for headers, per-page parallel calls for line items. All values copied verbatim — no paraphrasing. |
+| **store** | Save to PostgreSQL + embed OCR text chunks into Qdrant `doc_chunks`. OCR quality metadata stored inside `extracted_data._ocr_quality`. |
 
-### "Smart" Excel export
+Errors in any node set `status="error"` and short-circuit downstream nodes, but `store` always runs so a record exists for inspection.
 
-Each document downloads as a multi-sheet `.xlsx`:
+---
 
-- **Document** sheet: flat `Field / Value` table with nested objects flattened via dot-notation (e.g. `seller.name`, `seller.country`).
-- **Line Items / Items** sheet (etc.): one sheet per list-valued field, one row per item, with the inner dict columns expanded.
-- Bold header row, auto-fit column widths, frozen top row.
-
-### Architecture
+## Chat agent
 
 ```
-streamlit_app.py        # Chat page (default entry point)
-pages/
-├── 2_📄_Documents.py
-└── 3_📚_Knowledge_Base.py
-app/
-├── async_runner.py     # one persistent event loop for asyncpg/httpx/qdrant
-├── services.py         # @st.cache_resource singletons of services + pipelines
-├── styles.py           # custom CSS (typography, chat bubbles, file uploader, etc.)
-├── components.py       # reusable UI: status pills, empty states, badges
-└── document_export.py  # JSON + multi-sheet Excel helpers (pure logic, tested)
+detect_language → detect_intent → [route] → respond
+                                      │
+                                      ├── doc_qa  → PostgreSQL + doc_chunks
+                                      ├── rag     → lex_uz law collection
+                                      └── hybrid  → all three sources
 ```
 
-The async clients (Ollama, Qdrant, asyncpg) all live on one persistent event loop kept alive via `@st.cache_resource`, so they survive Streamlit's per-interaction reruns without cross-loop errors.
+- Detects language (uz / ru / en) and routes by intent automatically.
+- Answers grounded in retrieved context only — no hallucination from training data.
+- Real-time token streaming via async queue bridge (no page freeze during generation).
+- Responses include language, intent, and source indicators.
 
-## Roadmap
+---
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| 1 | Infrastructure & scaffolding | done |
-| 2 | Core services (OCR, LLM, vector, DB) | done |
-| 3 | Schemas & prompts | done |
-| 4 | LangGraph pipelines | done |
-| 5 | RAG ingestion (URL / DOCX / MD + bulk workflow) | done |
-| 6 | Streamlit UI | done |
-| 7 | Hardening & demo | pending |
+## Knowledge base (lex_uz)
+
+Ingests Uzbek customs law and regulations into the `lex_uz` Qdrant collection for RAG retrieval.
+
+**Supported sources:** URLs, `.docx`, `.md`, `.txt`
+
+**Ingestion pipeline:**
+
+```
+fetch/load → convert to markdown → clean OCR noise → hierarchical chunk → embed (BGE-M3) → store
+```
+
+**Chunking strategy:** `HierarchicalChunker` splits at `#` / `##` boundaries. Each chunk's text is prefixed with its full header breadcrumb (`# Customs Code\n## Article 5\n\n...`) so the embedding captures section context. Sub-chunks inherit parent headers.
+
+**Markdown backup:** Every ingestion saves the converted markdown to `docs/lex_uz/converted/` for inspection — this lets you verify the conversion quality before chunks go into the vector store.
+
+> **lex.uz note:** lex.uz pages are JavaScript-rendered; the URL loader will not extract content correctly. Export the DOCX from lex.uz and upload that instead.
+
+---
+
+## UI pages
+
+| Page | Description |
+|---|---|
+| 💬 **Chat** | Streaming chat with scope filter (all docs or specific IDs), health status sidebar, language/intent/source metadata after each answer |
+| 📄 **Documents** | Upload PDF/DOCX/JPG/PNG; real-time 7-stage pipeline progress per file; OCR quality badge + warning banner for DEGRADED/UNREADABLE docs; extracted data in Fields and Raw JSON tabs; export as JSON / Excel / CSV; delete |
+| 📚 **Knowledge Base** | Ingest URL or file with real-time stage progress; bulk workflow for multiple DOCX files; view converted markdown backups; manage ingested sources; wipe collection |
+| ⚙️ **Settings** | Connection health metrics for Ollama / Qdrant / PostgreSQL; collection stats; database management |
+
+---
+
+## Project layout
+
+```
+customs-doc-ai/
+├── streamlit_app.py            # Chat page — default entry point
+├── pages/
+│   ├── 2_📄_Documents.py       # Document upload + management
+│   ├── 3_📚_Knowledge_Base.py  # KB ingestion + inspection
+│   └── 4_⚙️_Settings.py       # Health checks + DB management
+│
+├── app/
+│   ├── async_runner.py         # Single background event loop bridge (run_async / stream_async)
+│   ├── services.py             # @st.cache_resource singletons + streaming generators
+│   ├── components.py           # Reusable UI: badges, doc cards, sidebar, health pills
+│   ├── styles.py               # CSS design system (dark sidebar, card layout, tags)
+│   └── document_export.py      # JSON / multi-sheet Excel / CSV export helpers
+│
+├── core/
+│   ├── pipeline/
+│   │   ├── doc_pipeline.py     # 7-stage LangGraph doc processing graph
+│   │   ├── chat_agent.py       # Chat + retrieval-only LangGraph graphs
+│   │   └── state.py            # TypedDict state definitions for both graphs
+│   ├── prompts/
+│   │   ├── correct.py          # OCR correction prompt
+│   │   ├── quality.py          # OCR quality assessment prompt
+│   │   ├── classify.py         # Document type classification prompt
+│   │   └── organize.py         # Schema-free structured extraction prompt
+│   ├── services/
+│   │   ├── ocr_service.py      # PyMuPDF + PaddleOCR with smart fallback
+│   │   ├── llm_service.py      # Ollama / OpenAI wrapper (complete, complete_json, astream_chat)
+│   │   ├── vector_store.py     # Qdrant async client (doc_chunks + lex_uz collections)
+│   │   └── db_service.py       # Async SQLAlchemy PostgreSQL persistence
+│   └── schemas/                # Pydantic schemas (AWB, GTD, CMR, Invoice, PackingList)
+│
+├── rag/
+│   ├── loaders.py              # URLLoader, DocxLoader, MarkdownFileLoader
+│   ├── chunking.py             # HierarchicalChunker (header split + size split)
+│   ├── ingestion.py            # LexIngestionService with progress callbacks
+│   └── bulk_ingest.py          # BulkIngestWorkflow for batch DOCX processing
+│
+├── config/
+│   └── settings.py             # Pydantic-settings with per-service env prefix
+│
+├── scripts/
+│   ├── init_db.py              # Create PostgreSQL tables (run once on setup)
+│   ├── verify_services.py      # Health check: Qdrant + Postgres + Ollama
+│   ├── process_document.py     # CLI: run full pipeline on a file
+│   ├── chat_with_docs.py       # CLI: ask the chat agent a question
+│   ├── ingest_lex.py           # CLI: ingest one or more sources into lex_uz
+│   ├── ingest_lex_docs.py      # CLI: bulk ingest from docs/lex_uz/originals/
+│   └── clear_lex.py            # CLI: wipe and recreate the lex_uz collection
+│
+├── tests/                      # Unit + integration tests (pytest)
+├── docs/
+│   ├── lex_uz/
+│   │   ├── originals/          # Drop DOCX files here for bulk ingestion
+│   │   ├── converted/          # Markdown backups saved after each ingestion
+│   │   └── markdown/           # Intermediate markdown staging (bulk workflow)
+│   └── sample_files/           # Sample customs documents for testing
+│
+├── docker-compose.yml          # Qdrant + PostgreSQL (+ optional Ollama)
+├── .env.example                # All configurable environment variables
+└── requirements.txt
+```
+
+---
+
+## Configuration
+
+All settings are read from `.env` (copy from `.env.example`). Key variables:
+
+```env
+# LLM provider: "ollama" (local, default) or "openai"
+LLM_PROVIDER=ollama
+
+# Ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_CHAT_MODEL=qwen2.5:7b
+OLLAMA_EMBED_MODEL=bge-m3
+
+# OpenAI (used only when LLM_PROVIDER=openai)
+OPENAI_API_KEY=
+OPENAI_CHAT_MODEL=gpt-4.1-mini
+
+# PostgreSQL
+POSTGRES_HOST=localhost
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=custdocs
+
+# Qdrant
+QDRANT_HOST=localhost
+QDRANT_PORT=6333
+
+# RAG chunking
+RAG_CHUNK_SIZE=500
+RAG_CHUNK_OVERLAP=50
+RAG_TOP_K=5
+```
+
+---
+
+## CLI scripts
+
+```bash
+# First-time setup
+python scripts/init_db.py
+python scripts/verify_services.py
+
+# Process a document (saves to Postgres + Qdrant)
+python scripts/process_document.py "docs/sample_files/invoice.pdf"
+
+# Chat from the terminal
+python scripts/chat_with_docs.py "What is the customs duty on medical devices?"
+python scripts/chat_with_docs.py "Какова сумма счёта?" --doc-ids <doc_id>
+
+# Ingest customs law
+python scripts/ingest_lex.py docs/lex_uz/originals/customs_code.docx
+python scripts/ingest_lex_docs.py   # bulk: processes all files in docs/lex_uz/originals/
+
+# Wipe and re-ingest
+python scripts/clear_lex.py && python scripts/ingest_lex_docs.py
+```
+
+---
+
+## Tests
+
+```bash
+# Fast unit tests — no services needed (~1 s)
+pytest
+
+# Full integration suite — requires Qdrant + Postgres + Ollama
+pytest --run-integration -v
+```
+
+---
+
+## OCR quality ratings
+
+Documents are automatically evaluated after OCR correction:
+
+| Rating | Meaning | UI indicator |
+|---|---|---|
+| **GOOD** | < 5% noise, all fields reliably readable | No banner |
+| **DEGRADED** | 5–35% noise, main content recoverable but numeric fields need verification | ⚠️ Amber warning banner |
+| **UNREADABLE** | > 35% noise, critical fields (amounts, dates, references) are corrupted | 🚨 Red warning banner |
+
+For DEGRADED/UNREADABLE documents: re-scan at higher DPI, or if the document originated digitally, obtain the DOCX/PDF source instead of a scan.

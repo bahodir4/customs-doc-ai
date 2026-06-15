@@ -148,11 +148,12 @@ if uploaded_files:
         )
 
     if run:
-        _STAGE_SEQ = ["load", "ocr", "quality", "classify", "extract", "store"]
+        _STAGE_SEQ = ["load", "ocr", "correct", "quality", "classify", "extract", "store"]
         _RUNNING_LABEL = {
             "load":     "📂 Loading file",
             "ocr":      "🔍 Extracting text (OCR)",
-            "quality":  "🔬 Assessing OCR quality",
+            "correct":  "✏️  Correcting OCR errors",
+            "quality":  "🔬 Evaluating text quality",
             "classify": "🏷️  Classifying document type",
             "extract":  "🧠 Extracting structured data",
             "store":    "💾 Storing in database + index",
@@ -160,7 +161,8 @@ if uploaded_files:
         _DONE_LABEL = {
             "load":     "📂 File loaded",
             "ocr":      "🔍 OCR complete",
-            "quality":  "🔬 OCR quality",
+            "correct":  "✏️  Text corrected",
+            "quality":  "🔬 Quality evaluated",
             "classify": "🏷️  Classified",
             "extract":  "🧠 Data extracted",
             "store":    "💾 Stored",
@@ -168,17 +170,27 @@ if uploaded_files:
 
         def _stage_detail(stage: str, out: dict) -> str:
             if stage == "ocr":
-                return f" — {out.get('ocr_pages', '?')} page(s) via {out.get('ocr_used', '?')}"
+                pages = out.get("ocr_pages", "?")
+                method = "PaddleOCR" if out.get("ocr_used") else "native text"
+                return f" — {pages} page(s) · {method}"
+            if stage == "correct":
+                n = len(out.get("corrected_text") or "")
+                return f" — {n:,} chars"
             if stage == "quality":
                 q = out.get("ocr_quality") or {}
-                rating = q.get("rating", "?")
-                pct = q.get("readable_pct")
-                issues = q.get("issues") or []
-                detail = f" — **{rating}**"
-                if pct is not None:
-                    detail += f" ({pct}% readable)"
-                if issues:
-                    detail += f" · {', '.join(str(i) for i in issues[:2])}"
+                raw = q.get("raw") or q
+                cor = q.get("corrected")
+                r_rating = raw.get("rating", "?")
+                r_pct = raw.get("readable_pct")
+                detail = f" — raw **{r_rating}**"
+                if r_pct is not None:
+                    detail += f" ({r_pct}%)"
+                if cor:
+                    c_rating = cor.get("rating", "?")
+                    c_pct = cor.get("readable_pct")
+                    detail += f" → corrected **{c_rating}**"
+                    if c_pct is not None:
+                        detail += f" ({c_pct}%)"
                 return detail
             if stage == "classify":
                 return f" — **{out.get('doc_type', '?')}**"
@@ -326,10 +338,13 @@ else:
             # ── OCR quality warning ───────────────────────────────────
             extracted = doc.get("extracted_data") or {}
             ocr_q = extracted.get("_ocr_quality") or {}
-            rating = (ocr_q.get("rating") or "").upper()
+            # Support both new {"raw": ..., "corrected": ...} and legacy flat structure
+            raw_q = ocr_q.get("raw") or ocr_q
+            cor_q = ocr_q.get("corrected")
+            rating = (raw_q.get("rating") or "").upper()
             if rating in ("DEGRADED", "UNREADABLE"):
-                readable_pct = ocr_q.get("readable_pct")
-                issues = ocr_q.get("issues") or []
+                readable_pct = raw_q.get("readable_pct")
+                issues = raw_q.get("issues") or []
                 issues_html = (
                     "".join(
                         f"<li style='margin-bottom:0.2rem;'><code style='font-size:0.8rem;'>{i}</code></li>"
@@ -346,6 +361,19 @@ else:
                     bg, border, icon, title_color = "#422006", "#78350f", "⚠️", "#fcd34d"
                     headline = f"Degraded OCR quality{pct_note}"
                     advice = "Numeric fields (totals, HS codes, weights) may contain digit errors. Verify critical values before use."
+                # Show correction improvement if available
+                correction_line = ""
+                if cor_q:
+                    c_rating = (cor_q.get("rating") or "?").upper()
+                    c_pct = cor_q.get("readable_pct")
+                    c_color = {"GOOD": "#86efac", "DEGRADED": "#fcd34d", "UNREADABLE": "#fca5a5"}.get(c_rating, "#9ca3af")
+                    c_pct_str = f" ({c_pct}% readable)" if c_pct is not None else ""
+                    correction_line = (
+                        f"<div style='font-size:0.8rem; color:#9ca3af; margin-top:0.5rem;'>"
+                        f"✏️ After correction: <span style='color:{c_color}; font-weight:600;'>"
+                        f"{c_rating.capitalize()}{c_pct_str}</span></div>"
+                    )
+
                 mb = "0.5rem" if issues_html else "0"
                 ul_block = (
                     "<ul style='margin:0; padding-left:1.25rem; color:#9ca3af;'>"
@@ -359,6 +387,7 @@ else:
                     f"<div style='font-size:0.8375rem; color:#d1d5db; margin-bottom:{mb};'>"
                     f"{advice}</div>"
                     f"{ul_block}"
+                    f"{correction_line}"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
