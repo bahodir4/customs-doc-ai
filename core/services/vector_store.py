@@ -24,6 +24,7 @@ from qdrant_client.http.models import (
     Distance,
     FieldCondition,
     Filter,
+    FilterSelector,
     MatchValue,
     PointStruct,
     Range,
@@ -180,6 +181,78 @@ class VectorStoreService:
             )
 
         return total_written
+
+    # ── Delete ───────────────────────────────────────────────────────
+
+    async def delete_doc_chunks(self, doc_id: str) -> None:
+        """Remove all Qdrant points for an uploaded document from doc_chunks."""
+        await self._client.delete(
+            collection_name=self._qs.doc_collection,
+            points_selector=FilterSelector(
+                filter=Filter(must=[
+                    FieldCondition(key="doc_id", match=MatchValue(value=doc_id))
+                ])
+            ),
+        )
+        logger.info("Deleted doc_chunks for doc_id=%s", doc_id)
+
+    async def delete_lex_source(self, source: str) -> None:
+        """Remove all Qdrant points for a lex source (URL or filename)."""
+        await self._client.delete(
+            collection_name=self._qs.lex_collection,
+            points_selector=FilterSelector(
+                filter=Filter(must=[
+                    FieldCondition(key="source", match=MatchValue(value=source))
+                ])
+            ),
+        )
+        logger.info("Deleted lex_uz chunks for source=%r", source)
+
+    # ── Inventory ─────────────────────────────────────────────────────
+
+    async def list_doc_chunk_counts(self) -> dict[str, int]:
+        """Return {doc_id: chunk_count} for every doc in doc_chunks."""
+        counts: dict[str, int] = {}
+        offset = None
+        while True:
+            records, next_offset = await self._client.scroll(
+                collection_name=self._qs.doc_collection,
+                limit=500,
+                offset=offset,
+                with_payload=["doc_id"],
+                with_vectors=False,
+            )
+            for rec in records:
+                doc_id = (rec.payload or {}).get("doc_id", "")
+                if doc_id:
+                    counts[doc_id] = counts.get(doc_id, 0) + 1
+            if next_offset is None:
+                break
+            offset = next_offset
+        return counts
+
+    async def list_lex_sources(self) -> list[dict[str, Any]]:
+        """Return [{source, chunks}] for every unique source in lex_uz."""
+        counts: dict[str, int] = {}
+        offset = None
+        while True:
+            records, next_offset = await self._client.scroll(
+                collection_name=self._qs.lex_collection,
+                limit=500,
+                offset=offset,
+                with_payload=["source"],
+                with_vectors=False,
+            )
+            for rec in records:
+                src = (rec.payload or {}).get("source", "unknown")
+                counts[src] = counts.get(src, 0) + 1
+            if next_offset is None:
+                break
+            offset = next_offset
+        return [
+            {"source": s, "chunks": c}
+            for s, c in sorted(counts.items(), key=lambda x: x[0])
+        ]
 
     # ── Search ───────────────────────────────────────────────────────
 

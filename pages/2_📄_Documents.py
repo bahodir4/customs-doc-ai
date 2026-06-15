@@ -19,7 +19,7 @@ from app.components import (
 )
 from app.document_export import to_csv_bytes, to_excel_bytes, to_json_bytes
 from app.services import (
-    delete_document,
+    delete_document_full,
     get_document,
     list_documents,
     process_document,
@@ -253,7 +253,7 @@ else:
                     key=f"del_{doc['id']}",
                 ):
                     try:
-                        delete_document(doc["id"])
+                        delete_document_full(doc["id"])
                         st.toast(f"Deleted {doc.get('file_name')}", icon="🗑️")
                         st.rerun()
                     except Exception as exc:
