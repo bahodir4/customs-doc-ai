@@ -25,6 +25,77 @@ from core.services import DBService, LLMService, VectorStoreService
 logger = get_logger(__name__)
 
 
+def build_retrieval_pipeline(
+    llm: LLMService,
+    vector: VectorStoreService,
+    db: DBService,
+):
+    """Detect language/intent, retrieve context, then stop — NO final LLM call.
+
+    Used by the streaming path: run this to get assembled context, language,
+    intent, and sources; then stream the final response separately via
+    LLMService.astream_chat().
+    """
+    top_k = settings.rag.top_k
+
+    async def detect_language_node(state: ChatState) -> dict[str, Any]:
+        lang = await llm.detect_language(state["user_input"])
+        return {"detected_language": lang}
+
+    async def detect_intent_node(state: ChatState) -> dict[str, Any]:
+        intent = await llm.detect_intent(state["user_input"])
+        return {"intent": intent}
+
+    async def retrieve_doc_qa_node(state: ChatState) -> dict[str, Any]:
+        pg_docs = await _fetch_pg_documents(db, state)
+        hits = await vector.search_docs(state["user_input"], top_k=top_k)
+        return {"pg_documents": pg_docs, "doc_chunks": [h.text for h in hits], "lex_chunks": []}
+
+    async def retrieve_rag_node(state: ChatState) -> dict[str, Any]:
+        hits = await vector.search_lex_with_context(state["user_input"], top_k=top_k)
+        return {"pg_documents": [], "doc_chunks": [], "lex_chunks": [h.text for h in hits]}
+
+    async def retrieve_hybrid_node(state: ChatState) -> dict[str, Any]:
+        pg_docs = await _fetch_pg_documents(db, state)
+        doc_hits = await vector.search_docs(state["user_input"], top_k=top_k)
+        lex_hits = await vector.search_lex_with_context(state["user_input"], top_k=top_k)
+        return {
+            "pg_documents": pg_docs,
+            "doc_chunks": [h.text for h in doc_hits],
+            "lex_chunks": [h.text for h in lex_hits],
+        }
+
+    async def store_context_node(state: ChatState) -> dict[str, Any]:
+        context = _build_context(state)
+        sources = _identify_sources(state)
+        logger.info("Retrieval pipeline complete — sources=%s", sources)
+        return {"context": context, "sources_used": sources}
+
+    def route_by_intent(state: ChatState) -> str:
+        return state.get("intent") or "hybrid"
+
+    graph = StateGraph(ChatState)
+    graph.add_node("detect_language", detect_language_node)
+    graph.add_node("detect_intent", detect_intent_node)
+    graph.add_node("retrieve_doc_qa", retrieve_doc_qa_node)
+    graph.add_node("retrieve_rag", retrieve_rag_node)
+    graph.add_node("retrieve_hybrid", retrieve_hybrid_node)
+    graph.add_node("store_context", store_context_node)
+
+    graph.set_entry_point("detect_language")
+    graph.add_edge("detect_language", "detect_intent")
+    graph.add_conditional_edges(
+        "detect_intent",
+        route_by_intent,
+        {"doc_qa": "retrieve_doc_qa", "rag": "retrieve_rag", "hybrid": "retrieve_hybrid"},
+    )
+    graph.add_edge("retrieve_doc_qa", "store_context")
+    graph.add_edge("retrieve_rag", "store_context")
+    graph.add_edge("retrieve_hybrid", "store_context")
+    graph.add_edge("store_context", END)
+    return graph.compile()
+
+
 def build_chat_agent(
     llm: LLMService,
     vector: VectorStoreService,

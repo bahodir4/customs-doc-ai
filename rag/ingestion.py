@@ -15,9 +15,12 @@ required there.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlparse
 
 from config import settings
 from core.logging import get_logger
@@ -55,6 +58,7 @@ class LexIngestionService:
         url_loader: URLLoader | None = None,
         docx_loader: DocxLoader | None = None,
         md_loader: MarkdownFileLoader | None = None,
+        markdown_backup_dir: Path | None = None,
     ) -> None:
         self._vector = vector_store
         self._chunker = chunker or HierarchicalChunker(
@@ -64,15 +68,27 @@ class LexIngestionService:
         self._url_loader = url_loader or URLLoader()
         self._docx_loader = docx_loader or DocxLoader()
         self._md_loader = md_loader or MarkdownFileLoader()
+        if markdown_backup_dir is not None:
+            markdown_backup_dir.mkdir(parents=True, exist_ok=True)
+        self._backup_dir = markdown_backup_dir
 
     # ── Public API ──────────────────────────────────────────────────
 
-    async def ingest(self, source: str | Path) -> IngestionResult:
-        """Auto-detect source type and ingest."""
+    async def ingest(
+        self,
+        source: str | Path,
+        progress_callback: Callable[[str, Any], None] | None = None,
+    ) -> IngestionResult:
+        """Auto-detect source type and ingest.
+
+        ``progress_callback`` is called with ``(stage, data)`` at each step:
+        ``converting`` → ``converted`` → ``chunking`` → ``chunked`` →
+        ``embedding`` → ``stored``.  Thread-safe: called from the event loop.
+        """
         source_str = str(source)
 
         if self._is_url(source_str):
-            return await self._ingest_url(source_str)
+            return await self._ingest_url(source_str, progress_callback)
 
         path = Path(source_str)
         if not path.exists():
@@ -80,9 +96,9 @@ class LexIngestionService:
 
         suffix = path.suffix.lower()
         if suffix in self._DOCX_EXTS:
-            return await self._ingest_docx(path)
+            return await self._ingest_docx(path, progress_callback)
         if suffix in self._MARKDOWN_EXTS:
-            return await self._ingest_markdown_file(path)
+            return await self._ingest_markdown_file(path, progress_callback)
 
         raise UnsupportedSourceError(
             f"Unsupported source type: {suffix!r}. "
@@ -101,27 +117,29 @@ class LexIngestionService:
 
     # ── Source-type handlers ────────────────────────────────────────
 
-    async def _ingest_url(self, url: str) -> IngestionResult:
+    async def _ingest_url(self, url: str, cb=None) -> IngestionResult:
+        if cb:
+            cb("converting", {"type": "url", "source": url})
         markdown = await self._url_loader.load(url)
-        return await self._ingest_markdown_body(
-            markdown=markdown, source=url, source_type="url"
-        )
+        if cb:
+            cb("converted", {"chars": len(markdown)})
+        return await self._ingest_markdown_body(markdown, url, "url", cb)
 
-    async def _ingest_docx(self, path: Path) -> IngestionResult:
+    async def _ingest_docx(self, path: Path, cb=None) -> IngestionResult:
+        if cb:
+            cb("converting", {"type": "docx", "source": path.name})
         markdown = await self._docx_loader.load(str(path))
-        return await self._ingest_markdown_body(
-            markdown=markdown,
-            source=str(path.resolve()),
-            source_type="docx",
-        )
+        if cb:
+            cb("converted", {"chars": len(markdown)})
+        return await self._ingest_markdown_body(markdown, str(path.resolve()), "docx", cb)
 
-    async def _ingest_markdown_file(self, path: Path) -> IngestionResult:
+    async def _ingest_markdown_file(self, path: Path, cb=None) -> IngestionResult:
+        if cb:
+            cb("converting", {"type": "markdown", "source": path.name})
         markdown = await self._md_loader.load(str(path))
-        return await self._ingest_markdown_body(
-            markdown=markdown,
-            source=str(path.resolve()),
-            source_type="markdown",
-        )
+        if cb:
+            cb("converted", {"chars": len(markdown)})
+        return await self._ingest_markdown_body(markdown, str(path.resolve()), "markdown", cb)
 
     # ── Core ingest ─────────────────────────────────────────────────
 
@@ -130,6 +148,7 @@ class LexIngestionService:
         markdown: str,
         source: str,
         source_type: str,
+        cb: Callable[[str, Any], None] | None = None,
     ) -> IngestionResult:
         if not markdown.strip():
             logger.warning("Empty markdown — nothing to ingest from %s", source)
@@ -140,12 +159,19 @@ class LexIngestionService:
                 chunks_written=0,
             )
 
+        self._save_backup(markdown, source, source_type)
+
         logger.info(
             "Ingesting %s (%s, %d chars of markdown)",
             source, source_type, len(markdown),
         )
 
+        if cb:
+            cb("chunking", {})
         chunks = self._chunker.chunk(markdown, source=source)
+        if cb:
+            cb("chunked", {"count": len(chunks)})
+
         if not chunks:
             logger.warning("Chunker produced 0 chunks for %s", source)
             return IngestionResult(
@@ -155,11 +181,15 @@ class LexIngestionService:
                 chunks_written=0,
             )
 
+        if cb:
+            cb("embedding", {"count": len(chunks)})
         await self._vector.ensure_collections()
         count = await self._vector.upsert_lex_chunks(
             chunks=[c.text for c in chunks],
             metadatas=[c.to_metadata() for c in chunks],
         )
+        if cb:
+            cb("stored", {"chunks_written": count})
         logger.info("Upserted %d chunks from %s", count, source)
 
         return IngestionResult(
@@ -170,6 +200,30 @@ class LexIngestionService:
         )
 
     # ── Helpers ─────────────────────────────────────────────────────
+
+    def _save_backup(self, markdown: str, source: str, source_type: str) -> None:
+        """Write markdown to the backup dir (if configured). Never raises."""
+        if self._backup_dir is None:
+            return
+        try:
+            filename = self._backup_filename(source, source_type)
+            backup_path = self._backup_dir / filename
+            backup_path.write_text(markdown, encoding="utf-8")
+            logger.debug("Saved markdown backup → %s", backup_path)
+        except Exception as exc:
+            logger.warning("Could not write markdown backup for %s: %s", source, exc)
+
+    @staticmethod
+    def _backup_filename(source: str, source_type: str) -> str:
+        """Derive a safe, unique filename for a markdown backup."""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if source_type == "url":
+            parsed = urlparse(source)
+            slug = (parsed.netloc + parsed.path).strip("/").replace("/", "_")
+            slug = re.sub(r"[^\w.-]", "_", slug)[:80]
+            return f"{slug}__{ts}.md"
+        stem = re.sub(r"[^\w.-]", "_", Path(source).stem)[:80]
+        return f"{stem}__{ts}.md"
 
     @staticmethod
     def _is_url(source: str) -> bool:

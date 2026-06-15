@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Final, Literal
+from typing import AsyncIterator, Final, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
@@ -165,6 +165,17 @@ class LLMService:
         system = _CHAT_SYSTEM_TEMPLATE.format(language=language)
         user = f"Context:\n{context}\n\nQuestion: {question}"
         return await self.complete(system, user)
+
+    async def astream_chat(
+        self, question: str, context: str, language: str
+    ) -> AsyncIterator[str]:
+        """Stream a chat response token by token."""
+        system = _CHAT_SYSTEM_TEMPLATE.format(language=language)
+        user = f"Context:\n{context}\n\nQuestion: {question}"
+        messages = [SystemMessage(content=system), HumanMessage(content=user)]
+        async for chunk in self._client.astream(messages):
+            if chunk.content:
+                yield str(chunk.content)
 
     # ── Helpers ──────────────────────────────────────────────────────
 

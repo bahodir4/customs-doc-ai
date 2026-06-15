@@ -8,12 +8,14 @@ objects created by the services are always used on the same loop — no
 from __future__ import annotations
 
 import asyncio
+import queue
 import threading
-from typing import Awaitable, TypeVar
+from typing import Any, AsyncGenerator, Awaitable, Callable, Generator, TypeVar
 
 import streamlit as st
 
 T = TypeVar("T")
+_SENTINEL = object()
 
 _loop: asyncio.AbstractEventLoop | None = None
 _loop_lock = threading.Lock()
@@ -33,6 +35,48 @@ def run_async(coro: Awaitable[T]) -> T:
     """Run a coroutine on the shared background event loop and block until done."""
     future = asyncio.run_coroutine_threadsafe(coro, _get_loop())
     return future.result()
+
+
+def stream_async(
+    async_gen_factory: Callable[[], AsyncGenerator[Any, None]],
+    timeout: float = 180.0,
+) -> Generator[Any, None, None]:
+    """Bridge an async generator to a sync generator via a Queue.
+
+    Submit a zero-arg callable that returns an async generator:
+        stream_async(lambda: my_async_gen(arg1, arg2))
+
+    Items yielded by the async generator are relayed to the sync caller.
+    Exceptions from the async side are re-raised in the sync generator.
+    Blocks at most `timeout` seconds between tokens before raising TimeoutError.
+    """
+    q: queue.Queue[Any] = queue.Queue()
+
+    async def _drain() -> None:
+        try:
+            async for item in async_gen_factory():
+                q.put(item)
+            q.put(_SENTINEL)
+        except Exception as exc:  # noqa: BLE001
+            q.put(exc)
+
+    asyncio.run_coroutine_threadsafe(_drain(), _get_loop())
+
+    while True:
+        try:
+            item = q.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError(f"Stream timed out after {timeout}s")
+        if item is _SENTINEL:
+            return
+        if isinstance(item, BaseException):
+            raise item
+        yield item
+
+
+def submit_to_loop(coro) -> "asyncio.Future[Any]":
+    """Submit a coroutine to the shared background event loop."""
+    return asyncio.run_coroutine_threadsafe(coro, _get_loop())
 
 
 def init_on_loop(factory):
