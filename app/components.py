@@ -135,17 +135,42 @@ def doc_type_badge(doc_type: str) -> str:
     return f'<span class="tag tag-purple">{doc_type}</span>'
 
 
+def ocr_quality_badge(quality: dict | None) -> str:
+    """Return badge HTML for an OCR quality assessment dict."""
+    if not quality:
+        return ""
+    rating = (quality.get("rating") or "UNKNOWN").upper()
+    pct = quality.get("readable_pct")
+    issues = quality.get("issues") or []
+    label_map = {
+        "GOOD":        ("tag-success", "🔬 OCR: Good"),
+        "DEGRADED":    ("tag-warn",    "🔬 OCR: Degraded"),
+        "UNREADABLE":  ("tag-error",   "🔬 OCR: Unreadable"),
+        "UNKNOWN":     ("",            "🔬 OCR: ?"),
+    }
+    cls, label = label_map.get(rating, ("", f"🔬 OCR: {rating}"))
+    detail = ""
+    if pct is not None:
+        detail = f" {pct}%"
+    if issues:
+        tip = ", ".join(str(i) for i in issues[:3])
+        detail += f" — {tip}"
+    return f'<span class="tag {cls}" title="{detail.strip()}">{label}</span>'
+
+
 def doc_card_header(doc: dict) -> str:
     """Return HTML for a document expander header with badges and timestamp."""
     name = doc.get("file_name", "Unknown")
     ts = format_timestamp(doc.get("created_at"))
     s_badge = status_badge(doc.get("status", "?"))
     t_badge = doc_type_badge(doc.get("doc_type", "?")) if doc.get("doc_type") else ""
+    quality = (doc.get("extracted_data") or {}).get("_ocr_quality")
+    q_badge = ocr_quality_badge(quality)
     return (
         f'<div class="doc-header">'
         f'<span class="doc-name">{name}</span>'
         f'<div class="doc-meta">'
-        f'{s_badge}&nbsp;{t_badge}'
+        f'{s_badge}&nbsp;{t_badge}&nbsp;{q_badge}'
         f'<span style="margin-left:0.5rem; color:var(--c-text-subtle);">{ts}</span>'
         f'</div>'
         f'</div>'

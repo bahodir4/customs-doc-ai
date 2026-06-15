@@ -148,10 +148,11 @@ if uploaded_files:
         )
 
     if run:
-        _STAGE_SEQ = ["load", "ocr", "classify", "extract", "store"]
+        _STAGE_SEQ = ["load", "ocr", "quality", "classify", "extract", "store"]
         _RUNNING_LABEL = {
             "load":     "📂 Loading file",
             "ocr":      "🔍 Extracting text (OCR)",
+            "quality":  "🔬 Assessing OCR quality",
             "classify": "🏷️  Classifying document type",
             "extract":  "🧠 Extracting structured data",
             "store":    "💾 Storing in database + index",
@@ -159,6 +160,7 @@ if uploaded_files:
         _DONE_LABEL = {
             "load":     "📂 File loaded",
             "ocr":      "🔍 OCR complete",
+            "quality":  "🔬 OCR quality",
             "classify": "🏷️  Classified",
             "extract":  "🧠 Data extracted",
             "store":    "💾 Stored",
@@ -167,6 +169,17 @@ if uploaded_files:
         def _stage_detail(stage: str, out: dict) -> str:
             if stage == "ocr":
                 return f" — {out.get('ocr_pages', '?')} page(s) via {out.get('ocr_used', '?')}"
+            if stage == "quality":
+                q = out.get("ocr_quality") or {}
+                rating = q.get("rating", "?")
+                pct = q.get("readable_pct")
+                issues = q.get("issues") or []
+                detail = f" — **{rating}**"
+                if pct is not None:
+                    detail += f" ({pct}% readable)"
+                if issues:
+                    detail += f" · {', '.join(str(i) for i in issues[:2])}"
+                return detail
             if stage == "classify":
                 return f" — **{out.get('doc_type', '?')}**"
             if stage == "extract":
@@ -240,6 +253,8 @@ else:
 
     def _render_fields(data: dict) -> None:
         for key, value in data.items():
+            if key.startswith("_"):  # skip internal metadata keys like _ocr_quality
+                continue
             if isinstance(value, dict):
                 st.markdown(
                     f"<div style='font-size:0.875rem; font-weight:600; color:var(--c-text); "
@@ -308,12 +323,51 @@ else:
         with st.expander(label=tab_label, expanded=False):
             st.markdown(header_html, unsafe_allow_html=True)
 
+            # ── OCR quality warning ───────────────────────────────────
+            extracted = doc.get("extracted_data") or {}
+            ocr_q = extracted.get("_ocr_quality") or {}
+            rating = (ocr_q.get("rating") or "").upper()
+            if rating in ("DEGRADED", "UNREADABLE"):
+                readable_pct = ocr_q.get("readable_pct")
+                issues = ocr_q.get("issues") or []
+                issues_html = (
+                    "".join(
+                        f"<li style='margin-bottom:0.2rem;'><code style='font-size:0.8rem;'>{i}</code></li>"
+                        for i in issues
+                    )
+                    if issues else ""
+                )
+                pct_note = f" — {readable_pct}% of text readable" if readable_pct is not None else ""
+                if rating == "UNREADABLE":
+                    bg, border, icon, title_color = "#450a0a", "#7f1d1d", "🚨", "#fca5a5"
+                    headline = f"Unreadable OCR{pct_note}"
+                    advice = "Critical fields (amounts, reference numbers, dates) are likely corrupted. Re-scan at higher resolution or supply a DOCX version."
+                else:
+                    bg, border, icon, title_color = "#422006", "#78350f", "⚠️", "#fcd34d"
+                    headline = f"Degraded OCR quality{pct_note}"
+                    advice = "Numeric fields (totals, HS codes, weights) may contain digit errors. Verify critical values before use."
+                mb = "0.5rem" if issues_html else "0"
+                ul_block = (
+                    "<ul style='margin:0; padding-left:1.25rem; color:#9ca3af;'>"
+                    + issues_html + "</ul>"
+                ) if issues_html else ""
+                st.markdown(
+                    f"<div style='margin:0.75rem 0; padding:0.875rem 1rem; background:{bg}; "
+                    f"border:1px solid {border}; border-radius:8px; border-left:3px solid {title_color};'>"
+                    f"<div style='font-weight:700; color:{title_color}; margin-bottom:0.35rem;'>"
+                    f"{icon} {headline}</div>"
+                    f"<div style='font-size:0.8375rem; color:#d1d5db; margin-bottom:{mb};'>"
+                    f"{advice}</div>"
+                    f"{ul_block}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
             # ── Action toolbar ────────────────────────────────────────
             st.markdown(
                 "<div style='height:0.75rem;'></div>",
                 unsafe_allow_html=True,
             )
-            extracted = doc.get("extracted_data") or {}
             file_stem = Path(doc.get("file_name", "doc")).stem
 
             a1, a2, a3, a4, _spacer = st.columns([1, 1, 1, 1, 3])

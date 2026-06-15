@@ -20,6 +20,7 @@ from core.prompts.organize import (
     organize_prompt,
     page_organize_prompt,
 )
+from core.prompts.quality import _QUALITY_SYSTEM, ocr_quality_prompt
 
 # Known classification labels — still used for UI filtering and routing.
 DOC_TYPES: Final[tuple[str, ...]] = (
@@ -48,6 +49,11 @@ def get_classify_prompt(raw_text: str) -> tuple[str, str]:
     return CLASSIFY_SYSTEM, classify_prompt(raw_text)
 
 
+def get_ocr_quality_prompt(raw_text: str) -> tuple[str, str]:
+    """Return (system, user) for OCR quality assessment."""
+    return _QUALITY_SYSTEM, ocr_quality_prompt(raw_text)
+
+
 def normalise_classify_response(raw: str) -> str:
     """Map a raw LLM response to a known classification label."""
     token = raw.strip().lower().split()[0] if raw.strip() else ""
@@ -60,6 +66,7 @@ __all__ = [
     "DOC_TYPES",
     "get_classify_prompt",
     "get_extraction_prompt",
+    "get_ocr_quality_prompt",
     "get_page_items_prompt",
     "normalise_classify_response",
 ]

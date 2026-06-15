@@ -125,7 +125,7 @@ def stream_chat_agent(
     return stream_async(_astream)
 
 
-_DOC_NODES = frozenset({"load", "ocr", "classify", "extract", "store"})
+_DOC_NODES = frozenset({"load", "ocr", "quality", "classify", "extract", "store"})
 _DOC_SKIP_FIELDS = frozenset({"raw_text"})  # too large to relay to UI
 
 

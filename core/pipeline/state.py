@@ -30,6 +30,9 @@ class DocProcessingState(TypedDict, total=False):
     ocr_pages: int
     ocr_used: bool
 
+    # ── Set by quality_node ──────────────────────────────────────────
+    ocr_quality: dict[str, Any]  # {"rating": "GOOD"|"DEGRADED"|"UNREADABLE", ...}
+
     # ── Set by classify_node ─────────────────────────────────────────
     doc_type: str
 
