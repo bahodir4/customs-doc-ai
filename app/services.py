@@ -3,8 +3,16 @@ from __future__ import annotations
 
 import asyncio
 import queue as _queue
+import warnings
 from dataclasses import dataclass
 from typing import Any, Generator
+
+# astream_events is stable in practice; suppress the beta label noise.
+warnings.filterwarnings(
+    "ignore",
+    message=".*astream_events.*beta.*",
+    category=UserWarning,
+)
 
 import streamlit as st
 
@@ -125,7 +133,7 @@ def stream_chat_agent(
     return stream_async(_astream)
 
 
-_DOC_NODES = frozenset({"load", "ocr", "quality", "classify", "extract", "store"})
+_DOC_NODES = frozenset({"load", "ocr", "correct", "quality", "classify", "extract", "store"})
 _DOC_SKIP_FIELDS = frozenset({"raw_text"})  # too large to relay to UI
 
 
@@ -144,13 +152,15 @@ def stream_doc_pipeline(
     _DONE = object()
 
     async def _run() -> None:
+        seen: set[str] = set()
         try:
             async for event in _pipeline.astream_events(
                 {"file_path": file_path}, version="v2"
             ):
                 if event.get("event") == "on_chain_end":
                     node = event.get("metadata", {}).get("langgraph_node")
-                    if node in _DOC_NODES:
+                    if node in _DOC_NODES and node not in seen:
+                        seen.add(node)
                         raw_out = event.get("data", {}).get("output") or {}
                         summary = {k: v for k, v in raw_out.items() if k not in _DOC_SKIP_FIELDS}
                         q.put((node, summary))
