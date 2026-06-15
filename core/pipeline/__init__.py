@@ -7,7 +7,7 @@ Two compiled graphs:
 Both take service objects via constructor injection so they're testable
 with mocks and decoupled from settings.
 """
-from core.pipeline.chat_agent import build_chat_agent
+from core.pipeline.chat_agent import build_chat_agent, build_retrieval_pipeline
 from core.pipeline.doc_pipeline import build_doc_pipeline
 from core.pipeline.state import ChatState, DocProcessingState
 
@@ -16,4 +16,5 @@ __all__ = [
     "DocProcessingState",
     "build_chat_agent",
     "build_doc_pipeline",
+    "build_retrieval_pipeline",
 ]

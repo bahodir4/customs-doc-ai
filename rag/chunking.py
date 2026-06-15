@@ -36,7 +36,8 @@ logger = get_logger(__name__)
 _DEFAULT_HEADERS: Final[list[tuple[str, str]]] = [
     ("#", "h1"),
     ("##", "h2"),
-    ("###", "h3"),
+    # ### is intentionally omitted — sub-sections stay inside their parent ##
+    # chunk so the LLM always receives a complete article when retrieved.
 ]
 
 # A header section under this length is kept as one chunk even if it's

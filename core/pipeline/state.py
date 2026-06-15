@@ -68,6 +68,9 @@ class ChatState(TypedDict, total=False):
     doc_chunks: list[str]
     lex_chunks: list[str]
 
+    # ── Set by retrieval pipeline (used by streaming path) ───────────
+    context: str              # assembled context string ready to pass to LLM
+
     # ── Set by respond_node ──────────────────────────────────────────
     final_response: str
     sources_used: list[str]  # e.g. ["postgresql", "doc_chunks", "lex_uz"]
