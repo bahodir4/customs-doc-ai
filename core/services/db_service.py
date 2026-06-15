@@ -103,6 +103,23 @@ class DBService:
     async def close(self) -> None:
         await self._engine.dispose()
 
+    async def tables_exist(self) -> bool:
+        """Return True if the documents table is present in the database."""
+        from sqlalchemy import text
+        try:
+            async with self._engine.begin() as conn:
+                result = await conn.execute(
+                    text(
+                        "SELECT EXISTS ("
+                        "  SELECT 1 FROM information_schema.tables"
+                        "  WHERE table_name = 'documents'"
+                        ")"
+                    )
+                )
+                return bool(result.scalar())
+        except Exception:
+            return False
+
     async def create_tables(self) -> None:
         """Create all tables. Idempotent."""
         async with self._engine.begin() as conn:

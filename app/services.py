@@ -89,6 +89,43 @@ def delete_document(doc_id: str) -> None:
     run_async(db.delete_document(doc_id))
 
 
+def delete_document_full(doc_id: str) -> None:
+    """Delete from PostgreSQL AND purge all Qdrant doc_chunks for this doc."""
+    svc = get_services()
+    run_async(svc.db.delete_document(doc_id))
+    run_async(svc.vector.delete_doc_chunks(doc_id))
+
+
+# ── KB / lex_uz helpers ─────────────────────────────────────────────
+
+
+def list_lex_sources() -> list[dict]:
+    return run_async(get_services().vector.list_lex_sources())
+
+
+def delete_lex_source(source: str) -> None:
+    run_async(get_services().vector.delete_lex_source(source))
+
+
+def list_doc_chunk_counts() -> dict[str, int]:
+    return run_async(get_services().vector.list_doc_chunk_counts())
+
+
+# ── Database management ─────────────────────────────────────────────
+
+
+def tables_exist() -> bool:
+    return run_async(get_services().db.tables_exist())
+
+
+def init_db() -> None:
+    run_async(get_services().db.create_tables())
+
+
+def drop_db() -> None:
+    run_async(get_services().db.drop_tables())
+
+
 def ingest_kb_source(source: str | Any):
     service = get_lex_ingestion_service()
     return run_async(service.ingest(source))

@@ -13,7 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.async_runner import run_async
 from app.components import empty_state, sidebar_brand
-from app.services import get_lex_ingestion_service, get_services, ingest_kb_source
+from app.services import (
+    delete_lex_source,
+    get_lex_ingestion_service,
+    get_services,
+    ingest_kb_source,
+    list_lex_sources,
+)
 from app.styles import inject_styles, render_tag
 from config import settings
 from rag.bulk_ingest import BulkIngestWorkflow
@@ -234,6 +240,37 @@ else:
             f"then come back to run the bulk workflow."
         ),
     )
+
+
+# ── Ingested sources ────────────────────────────────────────────────
+
+
+st.markdown("---")
+st.subheader("Ingested sources")
+st.caption("All sources currently stored in the lex_uz vector collection.")
+
+try:
+    lex_sources = list_lex_sources()
+except Exception as _exc:
+    lex_sources = []
+    st.warning(f"Could not load sources: {_exc}")
+
+if not lex_sources:
+    st.info("No sources ingested yet.")
+else:
+    for src_info in lex_sources:
+        src_name = src_info["source"]
+        chunk_count = src_info["chunks"]
+        col_name, col_count, col_btn = st.columns([5, 1, 1])
+        col_name.markdown(f"`{src_name}`")
+        col_count.markdown(f"**{chunk_count}** chunks")
+        if col_btn.button("Delete", key=f"del_lex_{src_name}", type="secondary"):
+            try:
+                delete_lex_source(src_name)
+                st.toast(f"Deleted: {src_name}", icon="🗑️")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Delete failed: {exc}")
 
 
 # ── Danger zone ─────────────────────────────────────────────────────
