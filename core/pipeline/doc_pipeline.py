@@ -32,6 +32,7 @@ from core.pipeline.state import DocProcessingState
 from core.prompts import (
     get_classify_prompt,
     get_extraction_prompt,
+    get_ocr_quality_prompt,
     get_page_items_prompt,
     normalise_classify_response,
 )
@@ -192,6 +193,27 @@ def build_doc_pipeline(
             logger.exception("OCR failed")
             return {"status": "error", "error_message": f"OCR failed: {exc}"}
 
+    async def quality_node(state: DocProcessingState) -> dict[str, Any]:
+        if _is_error(state):
+            return {}
+        try:
+            sys_p, usr_p = get_ocr_quality_prompt(state.get("raw_text", ""))
+            result = await llm.complete_json(sys_p, usr_p)
+            quality = {
+                "rating": result.get("rating", "UNKNOWN"),
+                "confidence": float(result.get("confidence", 0.0)),
+                "readable_pct": int(result.get("readable_pct", 0)),
+                "issues": result.get("issues") or [],
+            }
+            logger.info(
+                "OCR quality: %s (confidence=%.2f, readable=%d%%)",
+                quality["rating"], quality["confidence"], quality["readable_pct"],
+            )
+            return {"ocr_quality": quality}
+        except Exception as exc:
+            logger.warning("OCR quality check failed: %s", exc)
+            return {"ocr_quality": {"rating": "UNKNOWN", "issues": [str(exc)]}}
+
     async def classify_node(state: DocProcessingState) -> dict[str, Any]:
         if _is_error(state):
             return {"status": "error"}
@@ -235,12 +257,18 @@ def build_doc_pipeline(
         raw_text = state.get("raw_text") or ""
 
         try:
+            # Merge OCR quality metadata into extracted_data so it persists
+            # without needing a separate DB column.
+            extracted = dict(state.get("extracted_data") or {})
+            if state.get("ocr_quality"):
+                extracted["_ocr_quality"] = state["ocr_quality"]
+
             doc_id = await db.save_document(
                 doc_type=state.get("doc_type") or "unknown",
                 file_name=state.get("file_name") or "",
                 file_path=state["file_path"],
                 raw_text=raw_text,
-                extracted_data=state.get("extracted_data") or {},
+                extracted_data=extracted,
                 validation_errors=state.get("validation_errors") or [],
                 status=final_status,
             )
@@ -274,13 +302,15 @@ def build_doc_pipeline(
     graph = StateGraph(DocProcessingState)
     graph.add_node("load", load_node)
     graph.add_node("ocr", ocr_node)
+    graph.add_node("quality", quality_node)
     graph.add_node("classify", classify_node)
     graph.add_node("extract", extract_node)
     graph.add_node("store", store_node)
 
     graph.set_entry_point("load")
     graph.add_edge("load", "ocr")
-    graph.add_edge("ocr", "classify")
+    graph.add_edge("ocr", "quality")
+    graph.add_edge("quality", "classify")
     graph.add_edge("classify", "extract")
     graph.add_edge("extract", "store")
     graph.add_edge("store", END)
